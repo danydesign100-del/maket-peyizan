@@ -17,3 +17,9 @@ export function getSupabaseClient(): SupabaseClient<Database> {
   if (!supabase) throw new Error('Supabase n’est pas configuré. Renseignez VITE_SUPABASE_URL et VITE_SUPABASE_ANON_KEY dans .env.local.')
   return supabase
 }
+
+/** Current user from the locally persisted session; unlike `auth.getUser()` it needs no network. */
+export async function getSessionUser() {
+  const { data } = await getSupabaseClient().auth.getSession()
+  return data.session?.user ?? null
+}

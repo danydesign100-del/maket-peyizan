@@ -4,6 +4,17 @@ import { isSupabaseConfigured, supabase } from '../lib/supabase'
 import { getCurrentProfile, isInitialSetupComplete } from '../services/authService'
 import { localApi } from '../lib/localApi'
 import type { Profile } from '../types/auth'
+import { isNetworkError } from '../lib/offline/network'
+import { isOnline } from '../lib/offline/status'
+import { setSyncUser } from '../services/syncService'
+
+// The last profile is kept so that a signed-in user can keep working offline.
+const PROFILE_KEY = 'mp:profile'
+const saveProfile = (profile: Profile) => { try { localStorage.setItem(PROFILE_KEY, JSON.stringify(profile)) } catch { /* storage unavailable */ } }
+const clearProfile = () => { try { localStorage.removeItem(PROFILE_KEY) } catch { /* storage unavailable */ } }
+function cachedProfile(id?: string): Profile | null {
+  try { const profile = JSON.parse(localStorage.getItem(PROFILE_KEY) ?? 'null') as Profile | null; return profile && (!id || profile.id === id) ? profile : null } catch { return null }
+}
 
 type LocalSession = {
   user: {
@@ -29,6 +40,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const remember = (next: Profile) => { saveProfile(next); return next };
+
   const refreshProfile = async () => {
     if (!session) {
       setProfile(null);
@@ -37,7 +50,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       if (USE_LOCAL_DB) {
         const localProfile = await localApi.getProfile();
-        setProfile({
+        setProfile(remember({
           id: localProfile.id,
           full_name: localProfile.full_name,
           email: localProfile.email,
@@ -47,7 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             code: localProfile.role_code as any,
             name: localProfile.role_name,
           },
-        });
+        }));
       } else {
         const userId = (session as Session).user.id
         let nextProfile = await getCurrentProfile(userId)
@@ -56,9 +69,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (bootstrapError) throw bootstrapError
           nextProfile = await getCurrentProfile(userId)
         }
-        setProfile(nextProfile)
+        setProfile(nextProfile && remember(nextProfile))
       }
     } catch (cause) {
+      const offlineProfile = isNetworkError(cause) ? cachedProfile(USE_LOCAL_DB ? undefined : (session as Session).user.id) : null
+      if (offlineProfile) return setProfile(offlineProfile)
       setError(cause instanceof Error ? cause.message : 'Profil inaccessible');
     }
   };
@@ -76,12 +91,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
+    clearProfile();
+    setSyncUser(null);
     if (USE_LOCAL_DB) {
       localApi.clearToken();
       setSession(null);
       setProfile(null);
     } else if (supabase) {
-      await supabase.auth.signOut();
+      // A global sign-out needs the server; offline, only the local session is removed.
+      await supabase.auth.signOut(isOnline() ? undefined : { scope: 'local' });
       setSession(null);
       setProfile(null);
     }
@@ -105,7 +123,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             token,
           } as LocalSession);
           setLoading(false);
-        }).catch(() => {
+        }).catch((cause) => {
+          const profile = isNetworkError(cause) ? cachedProfile() : null;
+          if (profile) setSession({ user: { id: profile.id, email: profile.email, full_name: profile.full_name, role: { code: profile.role?.code ?? '', name: profile.role?.name ?? '' } }, token } as LocalSession);
           setLoading(false);
         });
       } else {
@@ -133,6 +153,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void refreshProfile();
   }, [session]);
+
+  useEffect(() => {
+    if (profile) setSyncUser(profile.id, profile.role?.code ?? '');
+  }, [profile]);
 
   const value = useMemo(() => ({ session, profile, loading, error, refreshProfile, signIn, signOut }), [session, profile, loading, error]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

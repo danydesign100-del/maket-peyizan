@@ -74,4 +74,6 @@ create policy "stock movements direct updates denied" on public.stock_movements 
 create policy "stock movements direct deletes denied" on public.stock_movements for delete to authenticated using (false);
 
 create policy "suppliers readable by authenticated" on public.suppliers for select to authenticated using (true);
+-- Already created by the foundation migration: recreate it instead of failing.
+drop policy if exists "suppliers administrator manage" on public.suppliers;
 create policy "suppliers administrator manage" on public.suppliers for all to authenticated using (public.is_admin()) with check (public.is_admin());

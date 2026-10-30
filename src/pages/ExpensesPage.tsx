@@ -1,11 +1,20 @@
+import { ChevronLeft, ChevronRight, FileSpreadsheet, Plus, Save, Trash2, X } from 'lucide-react'
+import { ImportDialog } from '../components/ImportDialog'
+import { expenseImporter } from '../services/importers'
+import { Skeleton, TableRowsSkeleton } from '../components/Skeleton'
 import { useEffect, useState, type FormEvent } from 'react'
 import { PageHeader } from '../components/PageHeader'
-import { expenseService, type ExpenseInput } from '../services/expenseService'
+import { expenseService, type ExpenseInput, type MonthlyExpenses } from '../services/expenseService'
+import { ColumnChart } from '../components/charts/ColumnChart'
 import { useAuth } from '../contexts/AuthContext'
 
 const emptyExpense: ExpenseInput = { label: '', amount: 0, expense_date: '', notes: '' }
 
+const formatAmount = (value: number) => new Intl.NumberFormat('fr-HT', { style: 'currency', currency: 'HTG', maximumFractionDigits: 0 }).format(value)
+
 export function ExpensesPage() {
+  const [importing, setImporting] = useState(false)
+
   const { profile } = useAuth()
   const canManage = profile?.role?.code === 'director' || profile?.role?.code === 'administrator' || profile?.role?.code === 'accountant'
   
@@ -18,6 +27,7 @@ export function ExpensesPage() {
   const [form, setForm] = useState<ExpenseInput>(emptyExpense)
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [monthly, setMonthly] = useState<MonthlyExpenses[] | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -27,6 +37,7 @@ export function ExpensesPage() {
       setExpenses(data || [])
       setCount(total ?? 0)
       setError(null)
+      void expenseService.getMonthlyTotals(6).then(setMonthly).catch(() => setMonthly([]))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Erreur de chargement')
     } finally {
@@ -85,14 +96,29 @@ export function ExpensesPage() {
       {notice && <div className="mt-4 rounded bg-emerald-50 p-3 text-emerald-800">{notice}</div>}
       {error && <div className="mt-4 rounded bg-red-50 p-3 text-red-800">{error}</div>}
       
-      <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
+      <div className="mt-6 flex flex-wrap items-center gap-2">
+        <button type="button" onClick={() => setImporting(true)} className="ui-button-secondary"><FileSpreadsheet className="h-4 w-4" aria-hidden="true" />Importer</button>
         <button 
           onClick={() => { setForm(emptyExpense); setOpen(true) }}
           className="ui-button-primary"
         >
-          Nouvelle dépense
+          <Plus className="h-4 w-4" aria-hidden="true" />Nouvelle dépense
         </button>
       </div>
+
+      <section className="ui-card mt-6 p-6">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div><h2 className="text-base font-bold text-slate-950">Dépenses des 6 derniers mois</h2><p className="mt-1 text-sm text-slate-600">Total des dépenses enregistrées par mois.</p></div>
+          {monthly && monthly.length > 0 && <p className="text-sm text-slate-600">Ce mois : <strong className="text-slate-950">{formatAmount(monthly[monthly.length - 1].total)}</strong></p>}
+        </div>
+        <div className="mt-5">
+          {monthly === null
+            ? <div role="status" aria-label="Chargement" className="flex h-[200px] items-end gap-6 pl-11">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="flex-1 rounded-b-none" style={{ height: `${35 + ((index * 29) % 55)}%` }} />)}</div>
+            : monthly.length === 0 ? <p className="ui-empty">Historique indisponible hors ligne.</p>
+            : <ColumnChart ariaLabel="Dépenses par mois sur 6 mois" height={200} formatValue={formatAmount} highlightKey={monthly[monthly.length - 1].month}
+              data={monthly.map((month) => ({ key: month.month, label: new Intl.DateTimeFormat('fr-HT', { month: 'short' }).format(new Date(`${month.month}-15T12:00:00`)), value: month.total, detail: `${month.count} dépense(s)` }))} />}
+        </div>
+      </section>
 
       {open && (
         <form onSubmit={submit} className="mt-6 grid gap-4 rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200 md:grid-cols-2">
@@ -145,10 +171,10 @@ export function ExpensesPage() {
           
           <div className="md:col-span-2 flex gap-3">
             <button type="submit" disabled={submitting} className="ui-button-primary">
-              {submitting ? 'Enregistrement...' : 'Enregistrer'}
+              <Save className="h-4 w-4" aria-hidden="true" />{submitting ? 'Enregistrement...' : 'Enregistrer'}
             </button>
             <button type="button" onClick={() => setOpen(false)} className="ui-button-secondary">
-              Annuler
+              <X className="h-4 w-4" aria-hidden="true" />Annuler
             </button>
           </div>
         </form>
@@ -168,12 +194,12 @@ export function ExpensesPage() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={6} className="p-6 text-center text-slate-500">Chargement...</td></tr>
+              <TableRowsSkeleton cols={6} />
             ) : expenses.length === 0 ? (
               <tr><td colSpan={6} className="p-6 text-center text-slate-500">Aucune dépense</td></tr>
             ) : expenses.map((expense) => (
               <tr key={expense.id} className="border-t">
-                <td className="p-3">{new Date(expense.expense_date).toLocaleDateString()}</td>
+                <td className="p-3">{new Date(`${String(expense.expense_date).slice(0, 10)}T12:00:00`).toLocaleDateString('fr-HT')}</td>
                 <td className="p-3 font-medium">{expense.label}</td>
                 <td className="p-3 font-medium">{Number(expense.amount).toFixed(2)} HTG</td>
                 <td className="p-3 text-slate-600">{expense.notes || '—'}</td>
@@ -181,9 +207,9 @@ export function ExpensesPage() {
                 <td className="p-3">
                   <button
                     onClick={() => void deleteExpense(expense.id)}
-                    className="text-red-600 hover:text-red-800"
+                    className="inline-flex items-center gap-1.5 text-red-600 hover:text-red-800"
                   >
-                    Supprimer
+                    <Trash2 className="h-4 w-4" aria-hidden="true" />Supprimer
                   </button>
                 </td>
               </tr>
@@ -203,18 +229,18 @@ export function ExpensesPage() {
               disabled={page === 0}
               className="ui-button-secondary disabled:opacity-50"
             >
-              Précédent
+              <ChevronLeft className="h-4 w-4" aria-hidden="true" />Précédent
             </button>
             <button
               onClick={() => setPage(page + 1)}
               disabled={(page + 1) * 20 >= count}
               className="ui-button-secondary disabled:opacity-50"
             >
-              Suivant
+              Suivant<ChevronRight className="h-4 w-4" aria-hidden="true" />
             </button>
           </div>
         </div>
       )}
-    </div>
+{importing && <ImportDialog importer={expenseImporter} onClose={() => setImporting(false)} onDone={(imported) => { setNotice(`${imported} dépense(s) importé(s).`); void load() }} />}    </div>
   )
 }

@@ -1,6 +1,10 @@
 import { getSupabaseClient, isLocalDbConfigured } from '../lib/supabase'
 import { localApi } from '../lib/localApi'
-import type { Product, ProductInput } from '../types/catalog'
+import type { Category, Product, ProductInput } from '../types/catalog'
+import type { Supplier } from '../types/stock'
+import { withOffline } from '../lib/offline/wrap'
+import { fetchAllRows } from '../lib/offline/fetchAll'
+import { byText, getSnapshot, matches, paginate, patchRow, patchSnapshot, registerSnapshot, upsertRow } from '../lib/offline/snapshot'
 
 const table = () => getSupabaseClient().from('products')
 
@@ -26,7 +30,7 @@ function fromLocalRow({ category_name, supplier_name, ...product }: LocalProduct
   }
 }
 
-export const productService = {
+const service = {
   getProducts: async (page: number, filters: ProductFilters) => {
     if (isLocalDbConfigured) {
       try {
@@ -182,5 +186,66 @@ export const productService = {
     return client.storage.from('product-images').getPublicUrl(path).data.publicUrl
   },
 }
+
+export const isLowStock = (product: Product & { is_low_stock?: boolean }) => product.is_low_stock ?? (Number(product.stock_quantity) > 0 && Number(product.stock_quantity) <= Number(product.minimum_stock))
+const findProduct = async (predicate: (product: Product) => boolean) => (await getSnapshot<Product>('products'))?.find(predicate)
+
+async function offlineProducts(page: number, filters: ProductFilters) {
+  const rows = await getSnapshot<Product>('products')
+  if (!rows) return undefined
+  return paginate(rows.filter((product) =>
+    (!filters.status || filters.status === 'all' || product.active === (filters.status === 'active'))
+    && (!filters.categoryId || product.category_id === filters.categoryId)
+    && matches(filters.search, product.name, product.barcode, product.brand)
+    && (filters.stock !== 'out' || Number(product.stock_quantity) === 0)
+    && (filters.stock !== 'low' || isLowStock(product)),
+  ).sort(byText('name')), page)
+}
+
+async function withRelations(product: Product): Promise<Product> {
+  const [categories, suppliers] = await Promise.all([getSnapshot<Category>('categories'), getSnapshot<Supplier>('suppliers')])
+  const category = categories?.find((item) => item.id === product.category_id)
+  const supplier = suppliers?.find((item) => item.id === product.supplier_id)
+  return { ...product, category: category ? { name: category.name } : null, supplier: supplier ? { name: supplier.name } : null }
+}
+
+const setActive = async (id: string, active: boolean) => { await patchSnapshot<Product>('products', (rows) => patchRow(rows, id, { active })); return { error: null } }
+
+export const productService = withOffline('products', service, {
+  throws: ['uploadImage'],
+  reads: {
+    getProducts: { fallback: offlineProducts },
+    getProductById: { fallback: async (id: string) => { const row = await findProduct((product) => product.id === id); return row && { data: row, error: null } } },
+    findByBarcode: { fallback: async (barcode: string) => { const rows = await getSnapshot<Product>('products'); return rows && { data: rows.find((product) => product.barcode === barcode && product.active) ?? null, error: null } } },
+    getSuppliers: { fallback: async () => { const rows = await getSnapshot<Supplier>('suppliers'); return rows && { data: rows.filter((supplier) => supplier.active).map(({ id, name }) => ({ id, name })).sort(byText('name')), error: null } } },
+  },
+  writes: {
+    createProduct: { label: (input: ProductInput) => `Nouveau produit « ${input.name} »`, createsId: true, optimistic: async (id: string, input: ProductInput) => {
+      const now = new Date().toISOString()
+      const row = await withRelations({ image_url: null, ...input, id, active: true, created_at: now, updated_at: now } as Product)
+      await patchSnapshot<Product>('products', (rows) => upsertRow(rows, row)); return row
+    } },
+    updateProduct: { label: (_id: string, input: Partial<ProductInput>) => `Modification du produit${input.name ? ` « ${input.name} »` : ''}`, optimistic: async (_tempId: string, id: string, input: Partial<ProductInput>) => {
+      const current = await findProduct((product) => product.id === id)
+      const row = await withRelations({ ...current, ...input, id } as Product)
+      await patchSnapshot<Product>('products', (rows) => upsertRow(rows, row)); return row
+    } },
+    deactivateProduct: { label: 'Désactivation d’un produit', optimistic: (_tempId: string, id: string) => setActive(id, false) },
+    activateProduct: { label: 'Réactivation d’un produit', optimistic: (_tempId: string, id: string) => setActive(id, true) },
+    setProductActive: { label: (_id: string, active: boolean) => active ? 'Réactivation d’un produit' : 'Désactivation d’un produit', optimistic: (_tempId: string, id: string, active: boolean) => setActive(id, active) },
+  },
+  // Images go to Supabase Storage; the local server keeps them inline.
+  onlineOnly: isLocalDbConfigured ? [] : ['uploadImage'],
+})
+
+registerSnapshot('products', async () => isLocalDbConfigured
+  ? (await localApi.query<LocalProductRow>(`
+      select p.*, c.name as category_name, s.name as supplier_name
+      from products p
+      left join categories c on c.id = p.category_id
+      left join suppliers s on s.id = p.supplier_id
+      order by p.name
+    `)).map(fromLocalRow)
+  : fetchAllRows<Product>('products', '*, category:categories(name), supplier:suppliers(name)', 'name'))
 
 export type { Product }

@@ -1,8 +1,12 @@
+import { Check, Lock, Printer, X } from 'lucide-react'
+import { BarList } from '../components/charts/BarList'
+import { PageSkeleton } from '../components/Skeleton'
 import { useEffect, useState } from 'react'
 import { PageHeader } from '../components/PageHeader'
 import { posService } from '../services/posService'
 import { useAuth } from '../contexts/AuthContext'
 import { getSupabaseClient, isLocalDbConfigured } from '../lib/supabase'
+import { cachedRead } from '../lib/offline/wrap'
 import { localApi } from '../lib/localApi'
 
 type PaymentSummary = {
@@ -45,157 +49,160 @@ export function DailyReceiptsPage() {
     void loadReport()
   }, [selectedDate])
 
+  const fetchReport = async (): Promise<DailyReport> => {
+    if (isLocalDbConfigured) {
+      const rows = await localApi.query<any>(`
+        select 
+          date(s.sold_at) as report_date,
+          coalesce(sum(case when s.status = 'completed' then s.total_amount else 0 end), 0) as total_sales,
+          coalesce(sum(case when s.status = 'refunded' then s.total_amount else 0 end), 0) as refund_total,
+          coalesce(count(case when s.status = 'refunded' then 1 end), 0) as refund_count,
+          coalesce(sum(case when s.status = 'cancelled' then s.total_amount else 0 end), 0) as cancelled_total,
+          coalesce(count(case when s.status = 'cancelled' then 1 end), 0) as cancelled_count,
+          coalesce(
+            (select sum(amount) from payments sp where sp.sale_id = s.id),
+            0
+          ) as total_payments
+        from sales s
+        where date(s.sold_at) = ?
+        group by date(s.sold_at)
+      `, [selectedDate])
+      
+      if (rows.length === 0) {
+        return {
+          date: selectedDate,
+          openingAmount: 0,
+          closingAmount: null,
+          totalSales: 0,
+          totalPayments: 0,
+          expectedCash: 0,
+          difference: null,
+          paymentBreakdown: [],
+          refundCount: 0,
+          refundTotal: 0,
+          cancelledCount: 0,
+          cancelledTotal: 0,
+          sales: []
+        }
+      }
+
+      const paymentRows = await localApi.query<any>(`
+        select 
+          sp.method,
+          count(*) as count,
+          sum(sp.amount) as total
+        from payments sp
+        join sales s on s.id = sp.sale_id
+        where date(s.sold_at) = ? and s.status = 'completed'
+        group by sp.method
+      `, [selectedDate])
+
+      const salesRows = await localApi.query<any>(`
+        select s.*, c.full_name as customer_name
+        from sales s
+        left join customers c on c.id = s.customer_id
+        where date(s.sold_at) = ?
+        order by s.sold_at desc
+      `, [selectedDate])
+
+      const sessionRows = await localApi.query<any>(`
+        select * from cash_sessions 
+        where date(opened_at) = ? 
+        order by opened_at desc 
+        limit 1
+      `, [selectedDate])
+
+      const session = sessionRows[0] as { opening_amount?: number; closing_amount?: number } | null
+
+      return {
+        date: selectedDate,
+        openingAmount: session?.opening_amount || 0,
+        closingAmount: session?.closing_amount || null,
+        totalSales: Number(rows[0].total_sales),
+        totalPayments: Number(rows[0].total_payments),
+        expectedCash: session?.opening_amount || 0,
+        difference: session?.closing_amount ? Number(session.closing_amount) - (session?.opening_amount || 0) : null,
+        paymentBreakdown: paymentRows.map((row: any) => ({
+          method: row.method,
+          count: row.count,
+          total: Number(row.total)
+        })),
+        refundCount: Number(rows[0].refund_count),
+        refundTotal: Number(rows[0].refund_total),
+        cancelledCount: Number(rows[0].cancelled_count),
+        cancelledTotal: Number(rows[0].cancelled_total),
+        sales: salesRows
+      }
+    } else {
+      const client = getSupabaseClient()
+      
+      const { data: salesData, error: salesError } = await client
+        .from('sales')
+        .select('*, customer:customers(full_name), payments(*)')
+        .gte('sold_at', selectedDate)
+        .lt('sold_at', new Date(new Date(selectedDate).getTime() + 24 * 60 * 60 * 1000).toISOString())
+        .order('sold_at', { ascending: false })
+
+      if (salesError) throw salesError
+
+      const completedSales = (salesData || []).filter((s: any) => s.status === 'completed')
+      const refundedSales = (salesData || []).filter((s: any) => s.status === 'refunded')
+      const cancelledSales = (salesData || []).filter((s: any) => s.status === 'cancelled')
+
+      const totalSales = completedSales.reduce((sum: number, s: any) => sum + Number(s.total_amount), 0)
+      const refundTotal = refundedSales.reduce((sum: number, s: any) => sum + Number(s.total_amount), 0)
+      const cancelledTotal = cancelledSales.reduce((sum: number, s: any) => sum + Number(s.total_amount), 0)
+
+      const paymentBreakdown: PaymentSummary[] = []
+      completedSales.forEach((sale: any) => {
+        (sale.payments || []).forEach((payment: any) => {
+          const existing = paymentBreakdown.find(p => p.method === payment.method)
+          if (existing) {
+            existing.count++
+            existing.total += Number(payment.amount)
+          } else {
+            paymentBreakdown.push({
+              method: payment.method,
+              count: 1,
+              total: Number(payment.amount)
+            })
+          }
+        })
+      })
+
+      const { data: sessionData } = await client
+        .from('cash_sessions')
+        .select('*')
+        .gte('opened_at', selectedDate)
+        .lt('opened_at', new Date(new Date(selectedDate).getTime() + 24 * 60 * 60 * 1000).toISOString())
+        .order('opened_at', { ascending: false })
+        .limit(1)
+
+      const session = sessionData?.[0] as { opening_amount?: number; closing_amount?: number } | null
+
+      return {
+        date: selectedDate,
+        openingAmount: session?.opening_amount || 0,
+        closingAmount: session?.closing_amount || null,
+        totalSales,
+        totalPayments: totalSales,
+        expectedCash: session?.opening_amount || 0,
+        difference: session?.closing_amount ? Number(session.closing_amount) - (session?.opening_amount || 0) : null,
+        paymentBreakdown,
+        refundCount: refundedSales.length,
+        refundTotal,
+        cancelledCount: cancelledSales.length,
+        cancelledTotal,
+        sales: salesData || []
+      }
+    }
+  }
+
   const loadReport = async () => {
     setLoading(true)
     setError(null)
     try {
-      if (isLocalDbConfigured) {
-        const rows = await localApi.query<any>(`
-          select 
-            date(s.sold_at) as report_date,
-            coalesce(sum(case when s.status = 'completed' then s.total_amount else 0 end), 0) as total_sales,
-            coalesce(sum(case when s.status = 'refunded' then s.total_amount else 0 end), 0) as refund_total,
-            coalesce(count(case when s.status = 'refunded' then 1 end), 0) as refund_count,
-            coalesce(sum(case when s.status = 'cancelled' then s.total_amount else 0 end), 0) as cancelled_total,
-            coalesce(count(case when s.status = 'cancelled' then 1 end), 0) as cancelled_count,
-            coalesce(
-              (select sum(amount) from sale_payments sp where sp.sale_id = s.id),
-              0
-            ) as total_payments
-          from sales s
-          where date(s.sold_at) = ?
-          group by date(s.sold_at)
-        `, [selectedDate])
-        
-        if (rows.length === 0) {
-          setReport({
-            date: selectedDate,
-            openingAmount: 0,
-            closingAmount: null,
-            totalSales: 0,
-            totalPayments: 0,
-            expectedCash: 0,
-            difference: null,
-            paymentBreakdown: [],
-            refundCount: 0,
-            refundTotal: 0,
-            cancelledCount: 0,
-            cancelledTotal: 0,
-            sales: []
-          })
-          return
-        }
-
-        const paymentRows = await localApi.query<any>(`
-          select 
-            sp.method,
-            count(*) as count,
-            sum(sp.amount) as total
-          from sale_payments sp
-          join sales s on s.id = sp.sale_id
-          where date(s.sold_at) = ? and s.status = 'completed'
-          group by sp.method
-        `, [selectedDate])
-
-        const salesRows = await localApi.query<any>(`
-          select s.*, c.full_name as customer_name
-          from sales s
-          left join customers c on c.id = s.customer_id
-          where date(s.sold_at) = ?
-          order by s.sold_at desc
-        `, [selectedDate])
-
-        const sessionRows = await localApi.query<any>(`
-          select * from cash_sessions 
-          where date(opened_at) = ? 
-          order by opened_at desc 
-          limit 1
-        `, [selectedDate])
-
-        const session = sessionRows[0] as { opening_amount?: number; closing_amount?: number } | null
-
-        setReport({
-          date: selectedDate,
-          openingAmount: session?.opening_amount || 0,
-          closingAmount: session?.closing_amount || null,
-          totalSales: Number(rows[0].total_sales),
-          totalPayments: Number(rows[0].total_payments),
-          expectedCash: session?.opening_amount || 0,
-          difference: session?.closing_amount ? Number(session.closing_amount) - (session?.opening_amount || 0) : null,
-          paymentBreakdown: paymentRows.map((row: any) => ({
-            method: row.method,
-            count: row.count,
-            total: Number(row.total)
-          })),
-          refundCount: Number(rows[0].refund_count),
-          refundTotal: Number(rows[0].refund_total),
-          cancelledCount: Number(rows[0].cancelled_count),
-          cancelledTotal: Number(rows[0].cancelled_total),
-          sales: salesRows
-        })
-      } else {
-        const client = getSupabaseClient()
-        
-        const { data: salesData, error: salesError } = await client
-          .from('sales')
-          .select('*, customer:customers(full_name), payments:sale_payments(*)')
-          .gte('sold_at', selectedDate)
-          .lt('sold_at', new Date(new Date(selectedDate).getTime() + 24 * 60 * 60 * 1000).toISOString())
-          .order('sold_at', { ascending: false })
-
-        if (salesError) throw salesError
-
-        const completedSales = (salesData || []).filter((s: any) => s.status === 'completed')
-        const refundedSales = (salesData || []).filter((s: any) => s.status === 'refunded')
-        const cancelledSales = (salesData || []).filter((s: any) => s.status === 'cancelled')
-
-        const totalSales = completedSales.reduce((sum: number, s: any) => sum + Number(s.total_amount), 0)
-        const refundTotal = refundedSales.reduce((sum: number, s: any) => sum + Number(s.total_amount), 0)
-        const cancelledTotal = cancelledSales.reduce((sum: number, s: any) => sum + Number(s.total_amount), 0)
-
-        const paymentBreakdown: PaymentSummary[] = []
-        completedSales.forEach((sale: any) => {
-          (sale.payments || []).forEach((payment: any) => {
-            const existing = paymentBreakdown.find(p => p.method === payment.method)
-            if (existing) {
-              existing.count++
-              existing.total += Number(payment.amount)
-            } else {
-              paymentBreakdown.push({
-                method: payment.method,
-                count: 1,
-                total: Number(payment.amount)
-              })
-            }
-          })
-        })
-
-        const { data: sessionData } = await client
-          .from('cash_sessions')
-          .select('*')
-          .gte('opened_at', selectedDate)
-          .lt('opened_at', new Date(new Date(selectedDate).getTime() + 24 * 60 * 60 * 1000).toISOString())
-          .order('opened_at', { ascending: false })
-          .limit(1)
-
-        const session = sessionData?.[0] as { opening_amount?: number; closing_amount?: number } | null
-
-        setReport({
-          date: selectedDate,
-          openingAmount: session?.opening_amount || 0,
-          closingAmount: session?.closing_amount || null,
-          totalSales,
-          totalPayments: totalSales,
-          expectedCash: session?.opening_amount || 0,
-          difference: session?.closing_amount ? Number(session.closing_amount) - (session?.opening_amount || 0) : null,
-          paymentBreakdown,
-          refundCount: refundedSales.length,
-          refundTotal,
-          cancelledCount: cancelledSales.length,
-          cancelledTotal,
-          sales: salesData || []
-        })
-      }
+      setReport(await cachedRead(`daily-report:${selectedDate}`, fetchReport, { style: 'throw' }))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Erreur de chargement')
     } finally {
@@ -271,12 +278,12 @@ export function DailyReceiptsPage() {
           />
         </div>
         <button onClick={handlePrint} className="ui-button-secondary mt-5">
-          Imprimer le rapport
+          <Printer className="h-4 w-4" aria-hidden="true" />Imprimer le rapport
         </button>
       </div>
       
       {loading ? (
-        <div className="mt-6 p-8">Chargement...</div>
+        <PageSkeleton cards={4} rows={6} cols={5} />
       ) : report && (
         <div className="mt-6 space-y-6">
           {/* Résumé */}
@@ -307,7 +314,11 @@ export function DailyReceiptsPage() {
           {/* Ventilation par moyen de paiement */}
           <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
             <h2 className="text-lg font-semibold">Ventilation par moyen de paiement</h2>
-            <div className="mt-4 overflow-x-auto">
+            {report.paymentBreakdown.length > 0 && <div className="no-print mt-5 max-w-2xl">
+              <BarList ariaLabel="Montant encaissé par moyen de paiement" formatValue={formatMoney}
+                data={[...report.paymentBreakdown].sort((a, b) => b.total - a.total).map((payment) => ({ key: payment.method, label: paymentMethodLabels[payment.method] || payment.method, value: payment.total, detail: `${payment.count} paiement(s)` }))} />
+            </div>}
+            <div className="mt-5 overflow-x-auto">
               <table className="w-full text-left text-sm">
                 <thead className="bg-slate-50">
                   <tr>
@@ -364,7 +375,7 @@ export function DailyReceiptsPage() {
               <div className="no-print mt-4">
                 {!showCloseForm ? (
                   <button onClick={() => setShowCloseForm(true)} className="ui-button-primary">
-                    Clôturer la journée
+                    <Lock className="h-4 w-4" aria-hidden="true" />Clôturer la journée
                   </button>
                 ) : (
                   <div className="flex gap-3">
@@ -377,10 +388,10 @@ export function DailyReceiptsPage() {
                       className="rounded border p-2"
                     />
                     <button onClick={() => void closeDay()} disabled={loading} className="ui-button-primary">
-                      Confirmer
+                      <Check className="h-4 w-4" aria-hidden="true" />Confirmer
                     </button>
                     <button onClick={() => setShowCloseForm(false)} className="ui-button-secondary">
-                      Annuler
+                      <X className="h-4 w-4" aria-hidden="true" />Annuler
                     </button>
                   </div>
                 )}

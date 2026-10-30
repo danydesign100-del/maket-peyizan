@@ -1,11 +1,14 @@
+import { KeyRound, Save, SlidersHorizontal, UserRound } from 'lucide-react'
+import { CardsSkeleton } from '../components/Skeleton'
 import { PageHeader } from '../components/PageHeader'
 import { useEffect, useState, type FormEvent } from 'react'
 import { useAuth } from '../contexts/AuthContext'
+import { cachedRead } from '../lib/offline/wrap'
 import { getSupabaseClient, isLocalDbConfigured, isSupabaseConfigured, supabase } from '../lib/supabase'
 import { localApi } from '../lib/localApi'
 
 export function SettingsPage() {
-  const { profile, signOut } = useAuth()
+  const { profile } = useAuth()
   const canManageSettings = profile?.role?.code === 'director' || profile?.role?.code === 'administrator'
   
   const [settings, setSettings] = useState<Record<string, any>>({})
@@ -23,24 +26,23 @@ export function SettingsPage() {
   const loadSettings = async () => {
     setLoading(true)
     try {
-      if (isLocalDbConfigured) {
-        const data = await localApi.getSettings()
+      setSettings(await cachedRead('settings', async () => {
         const settingsMap: Record<string, any> = {}
-        data.forEach((setting) => {
+        if (isLocalDbConfigured) {
+          const data = await localApi.getSettings()
+          data.forEach((setting) => {
+            settingsMap[setting.key] = setting.value
+          })
+          return settingsMap
+        }
+        const client = getSupabaseClient()
+        const { data, error: requestError } = await client.from('settings').select('*')
+        if (requestError) throw requestError
+        data?.forEach((setting: any) => {
           settingsMap[setting.key] = setting.value
         })
-        setSettings(settingsMap)
-        return
-      }
-      const client = getSupabaseClient()
-      const { data, error: requestError } = await client.from('settings').select('*')
-      if (requestError) throw requestError
-      
-      const settingsMap: Record<string, any> = {}
-      data?.forEach((setting: any) => {
-        settingsMap[setting.key] = setting.value
-      })
-      setSettings(settingsMap)
+        return settingsMap
+      }, { style: 'throw' }))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Erreur de chargement')
     } finally {
@@ -85,7 +87,7 @@ export function SettingsPage() {
             full_name: accountForm.full_name,
             email: accountForm.email
           })
-          .eq('id', profile?.id)
+          .eq('id', profile?.id ?? '')
         
         if (updateError) throw updateError
       }
@@ -144,15 +146,15 @@ export function SettingsPage() {
       <div className="mt-6 flex gap-2 border-b">
         <button
           onClick={() => setShowAccountTab(false)}
-          className={`px-4 py-2 ${!showAccountTab ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 ${!showAccountTab ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
         >
-          Paramètres système
+          <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />Paramètres système
         </button>
         <button
           onClick={() => setShowAccountTab(true)}
-          className={`px-4 py-2 ${showAccountTab ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 ${showAccountTab ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
         >
-          Mon compte
+          <UserRound className="h-4 w-4" aria-hidden="true" />Mon compte
         </button>
       </div>
       
@@ -189,18 +191,18 @@ export function SettingsPage() {
             </div>
             <div className="flex gap-3">
               <button type="submit" disabled={accountSubmitting} className="ui-button-primary">
-                {accountSubmitting ? 'Mise à jour...' : 'Mettre à jour'}
+                <Save className="h-4 w-4" aria-hidden="true" />{accountSubmitting ? 'Mise à jour...' : 'Mettre à jour'}
               </button>
               {isSupabaseConfigured && (
                 <button type="button" onClick={handlePasswordReset} className="ui-button-secondary">
-                  Changer mon mot de passe
+                  <KeyRound className="h-4 w-4" aria-hidden="true" />Changer mon mot de passe
                 </button>
               )}
             </div>
           </form>
         </div>
       ) : loading ? (
-        <div className="mt-6 p-8">Chargement...</div>
+        <CardsSkeleton count={4} className="mt-6 grid gap-4 lg:grid-cols-2" />
       ) : (
         <div className="mt-6 space-y-6">
           {/* Informations entreprise */}

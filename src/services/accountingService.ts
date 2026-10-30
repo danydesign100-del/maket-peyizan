@@ -1,5 +1,6 @@
-import { getSupabaseClient, isLocalDbConfigured } from '../lib/supabase'
+import { getSessionUser, getSupabaseClient, isLocalDbConfigured } from '../lib/supabase'
 import { localApi } from '../lib/localApi'
+import { withOffline } from '../lib/offline/wrap'
 import type { AccountInput, AccountingPeriodInput, JournalEntryInput, JournalEntryLineInput, AdjustmentInput } from '../types/accounting'
 
 const accountsTable = () => getSupabaseClient().from('accounts')
@@ -8,7 +9,7 @@ const journalEntriesTable = () => getSupabaseClient().from('journal_entries')
 const journalEntryLinesTable = () => getSupabaseClient().from('journal_entry_lines')
 const adjustmentsTable = () => getSupabaseClient().from('adjustments')
 
-export const accountingService = {
+const service = {
   // ============================================
   // Comptes (Plan comptable)
   // ============================================
@@ -77,7 +78,7 @@ export const accountingService = {
     return periodsTable().update({ 
       is_closed: true, 
       closed_at: new Date().toISOString(),
-      closed_by: (await getSupabaseClient().auth.getUser()).data.user?.id 
+      closed_by: (await getSessionUser())?.id 
     }).eq('id', id)
   },
 
@@ -235,8 +236,7 @@ export const accountingService = {
   },
 
   approveAdjustment: async (id: string) => {
-    const client = getSupabaseClient()
-    const userId = (await client.auth.getUser()).data.user?.id
+    const userId = (await getSessionUser())?.id
     
     return adjustmentsTable().update({ 
       status: 'approved',
@@ -419,3 +419,9 @@ export const accountingService = {
     return { data, error: null };
   },
 }
+
+// Accounting entries are validated by the server; only reading works offline.
+export const accountingService = withOffline('accounting', service, {
+  reads: { getAccounts: true, getAccountById: true, getPeriods: true, getActivePeriod: true, getJournalEntries: true, getJournalEntryById: true, getJournalEntryLines: true, getUnsyncedSales: true, getAdjustments: true, getAdjustmentById: true, getGeneralLedger: true, getTrialBalance: true, getAuditLog: true, getBalanceSheet: true, getIncomeStatement: true },
+  onlineOnly: ['createAccount', 'updateAccount', 'deactivateAccount', 'createPeriod', 'closePeriod', 'createJournalEntry', 'updateJournalEntry', 'postJournalEntry', 'voidJournalEntry', 'syncSaleToAccounting', 'createAdjustment', 'updateAdjustment', 'submitForApproval', 'approveAdjustment'],
+})

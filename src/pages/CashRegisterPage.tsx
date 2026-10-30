@@ -1,3 +1,5 @@
+import { Banknote, Check, Lock, LockOpen, Plus, Printer, Search, Trash2, X } from 'lucide-react'
+import { CardsSkeleton, Skeleton, TableSkeleton } from '../components/Skeleton'
 import { useEffect, useState, type FormEvent } from 'react'
 import { PageHeader } from '../components/PageHeader'
 import { posService } from '../services/posService'
@@ -239,7 +241,7 @@ export function CashRegisterPage() {
   }
   
   if (sessionLoading) {
-    return <div className="p-8">Chargement de la session...</div>
+    return <div role="status" aria-label="Chargement de la session"><Skeleton className="h-3 w-40" /><Skeleton className="mt-3 h-8 w-56" /><div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]"><TableSkeleton rows={5} cols={5} className="" /><CardsSkeleton count={2} className="grid gap-4" /></div></div>
   }
   
   if (!session) {
@@ -258,8 +260,8 @@ export function CashRegisterPage() {
               required
             />
           </div>
-          <button type="submit" disabled={loading} className="mt-4 rounded-lg bg-brand-700 px-4 py-2 text-white disabled:opacity-50">
-            {loading ? 'Ouverture...' : 'Ouvrir la caisse'}
+          <button type="submit" disabled={loading} className="inline-flex items-center gap-1.5 mt-4 rounded-lg bg-brand-700 px-4 py-2 text-white disabled:opacity-50">
+            <LockOpen className="h-4 w-4" aria-hidden="true" />{loading ? 'Ouverture...' : 'Ouvrir la caisse'}
           </button>
         </form>
       </div>
@@ -285,11 +287,11 @@ export function CashRegisterPage() {
             autoFocus
           />
           <button type="submit" disabled={loading} className="ui-button-primary px-5">
-            Ajouter
+            <Plus className="h-4 w-4" aria-hidden="true" />Ajouter
           </button>
         </form>
         <div className="ui-card mt-4 p-3">
-          {selectedCustomer ? <div className="flex items-center justify-between gap-3"><span className="text-sm"><strong>{selectedCustomer.full_name}</strong><span className="ml-2 text-slate-500">Client sélectionné</span></span><button type="button" onClick={() => setSelectedCustomer(null)} className="text-sm text-red-700">Retirer</button></div> : <form onSubmit={searchCustomers} className="flex gap-2"><input value={customerQuery} onChange={(event) => setCustomerQuery(event.target.value)} placeholder="Rechercher un client (optionnel)" className="min-w-0 flex-1" /><button disabled={loading} className="ui-button-secondary px-4">Client</button></form>}
+          {selectedCustomer ? <div className="flex items-center justify-between gap-3"><span className="text-sm"><strong>{selectedCustomer.full_name}</strong><span className="ml-2 text-slate-500">Client sélectionné</span></span><button type="button" onClick={() => setSelectedCustomer(null)} className="inline-flex items-center gap-1.5 text-sm text-red-700"><X className="h-4 w-4" aria-hidden="true" />Retirer</button></div> : <form onSubmit={searchCustomers} className="flex gap-2"><input value={customerQuery} onChange={(event) => setCustomerQuery(event.target.value)} placeholder="Rechercher un client (optionnel)" className="min-w-0 flex-1" /><button disabled={loading} className="ui-button-secondary px-4"><Search className="h-4 w-4" aria-hidden="true" />Client</button></form>}
           {!selectedCustomer && customerMatches.length > 0 && <div className="mt-2 divide-y rounded border">{customerMatches.map((customer) => <button key={customer.id} type="button" onClick={() => { setSelectedCustomer(customer); setCustomerMatches([]) }} className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50"><strong>{customer.full_name}</strong>{customer.phone && <span className="ml-2 text-slate-500">{customer.phone}</span>}</button>)}</div>}
         </div>
         
@@ -326,7 +328,7 @@ export function CashRegisterPage() {
                   <td className="p-3 font-medium text-slate-700">{item.unitPrice.toFixed(2)} HTG</td>
                   <td className="p-3 font-medium">{item.lineTotal.toFixed(2)} HTG</td>
                   <td className="p-3">
-                    <button onClick={() => removeCartItem(index)} className="text-red-600 hover:text-red-800">×</button>
+                    <button onClick={() => removeCartItem(index)} aria-label={`Retirer ${item.name}`} className="inline-flex items-center text-red-600 hover:text-red-800"><Trash2 className="h-4 w-4" aria-hidden="true" /></button>
                   </td>
                 </tr>
               ))}
@@ -360,18 +362,18 @@ export function CashRegisterPage() {
             disabled={cart.length === 0 || loading}
             className="ui-button-primary flex-1 py-3"
           >
-            Encaisser ({cartTotals.totalAmount.toFixed(2)} HTG)
+            <Banknote className="h-4 w-4" aria-hidden="true" />Encaisser ({cartTotals.totalAmount.toFixed(2)} HTG)
           </button>
           <button
             onClick={closeSession}
-            className="rounded-lg border px-6 py-3"
+            className="inline-flex items-center gap-1.5 rounded-lg border px-6 py-3"
           >
-            Fermer la caisse
+            <Lock className="h-4 w-4" aria-hidden="true" />Fermer la caisse
           </button>
           {completedSale && (
         <div className="flex gap-3">
-          <button type="button" onClick={() => window.print()} className="rounded-lg border px-4 py-3">Réimprimer le reçu</button>
-          <button type="button" onClick={() => setCompletedSale(null)} className="rounded-lg border px-4 py-3">Nouvelle vente</button>
+          <button type="button" onClick={() => window.print()} className="inline-flex items-center gap-1.5 rounded-lg border px-4 py-3"><Printer className="h-4 w-4" aria-hidden="true" />Réimprimer le reçu</button>
+          <button type="button" onClick={() => setCompletedSale(null)} className="inline-flex items-center gap-1.5 rounded-lg border px-4 py-3"><Plus className="h-4 w-4" aria-hidden="true" />Nouvelle vente</button>
         </div>
       )}
         </div>
@@ -379,7 +381,7 @@ export function CashRegisterPage() {
       <aside className="ui-card h-fit p-5 xl:sticky xl:top-6">
         <h2 className="text-base font-bold text-slate-950">Recherche produit</h2>
         <p className="mt-1 text-sm leading-5 text-slate-600">Trouvez un article si le code-barres n’est pas disponible.</p>
-        <form onSubmit={searchProducts} className="mt-4 space-y-2"><input value={productQuery} onChange={(event) => setProductQuery(event.target.value)} placeholder="Nom, référence ou marque" className="w-full" /><button disabled={loading} className="ui-button-secondary w-full">Rechercher</button></form>
+        <form onSubmit={searchProducts} className="mt-4 space-y-2"><input value={productQuery} onChange={(event) => setProductQuery(event.target.value)} placeholder="Nom, référence ou marque" className="w-full" /><button disabled={loading} className="ui-button-secondary w-full"><Search className="h-4 w-4" aria-hidden="true" />Rechercher</button></form>
         {productMatches.length > 0 && <div className="mt-4 divide-y divide-slate-100 rounded-lg border border-slate-200">{productMatches.map((product) => <button key={product.id} type="button" onClick={() => { addToCart(product); setProductMatches([]); setProductQuery('') }} className="flex w-full items-center justify-between gap-3 px-3 py-3 text-left hover:bg-slate-50"><span><strong className="block text-sm text-slate-900">{product.name}</strong><small className="text-xs text-slate-500">{product.stock_quantity} {product.unit} disponible(s)</small></span><strong className="text-sm text-brand-700">{Number(product.selling_price).toFixed(2)} HTG</strong></button>)}</div>}
         {productQuery && productMatches.length === 0 && !loading && <p className="mt-4 text-sm text-slate-500">Aucun produit correspondant.</p>}
       </aside>
@@ -437,16 +439,16 @@ export function CashRegisterPage() {
               <button
                 type="submit"
                 disabled={loading}
-                className="flex-1 rounded-lg bg-brand-700 px-4 py-2 text-white disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 flex-1 rounded-lg bg-brand-700 px-4 py-2 text-white disabled:opacity-50"
               >
-                {loading ? 'Traitement...' : 'Confirmer'}
+                <Check className="h-4 w-4" aria-hidden="true" />{loading ? 'Traitement...' : 'Confirmer'}
               </button>
               <button
                 type="button"
                 onClick={() => setShowPayment(false)}
-                className="rounded-lg border px-4 py-2"
+                className="inline-flex items-center gap-1.5 rounded-lg border px-4 py-2"
               >
-                Annuler
+                <X className="h-4 w-4" aria-hidden="true" />Annuler
               </button>
             </div>
           </form>

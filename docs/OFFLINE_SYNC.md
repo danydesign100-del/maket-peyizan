@@ -18,6 +18,39 @@ d'activer ce flux. Elle ajoute une clé d'idempotence et la RPC
 3. Vérifier qu'un utilisateur `cashier` peut appeler la RPC et qu'un utilisateur
    non autorisé reçoit un refus.
 
+## Mode hors ligne de toute l'application
+
+Au-delà des ventes, toute l'application fonctionne sans connexion
+(`src/lib/offline/`), avec Supabase comme avec le serveur local :
+
+- **Lectures** : chaque lecture passe d'abord par le réseau (délai maximal de
+  12 s), puis la réponse est copiée dans IndexedDB. Hors ligne, la dernière
+  copie est affichée avec un bandeau « Mode hors ligne ».
+- **Données de référence** : produits, clients, fournisseurs et catégories sont
+  copiés intégralement à chaque synchronisation. Recherche, filtres et
+  pagination restent donc disponibles hors ligne.
+- **Écritures** : clients, produits, catégories, fournisseurs, mouvements de
+  stock, dépenses, proformas, comptages de caisse, ouverture et fermeture de caisse sont placés dans
+  une file (`outbox`) et rejoués dans l'ordre au retour de la connexion. Les
+  identifiants temporaires (`local-…`) sont remplacés par les identifiants du
+  serveur. Une fermeture de caisse envoie d'abord les ventes faites avant elle.
+- **En ligne uniquement** : comptabilité (écritures, validation, ajustements),
+  utilisateurs, paramètres et téléversement d'images.
+- **Bouton de synchronisation** (barre latérale et en-tête mobile) : envoie les
+  modifications puis télécharge les dernières données. La synchronisation est
+  aussi automatique au retour de la connexion, au retour sur l'onglet et toutes
+  les 10 minutes. Le détail liste les opérations en échec, qui peuvent être
+  abandonnées manuellement.
+- **Application** : `public/sw.js` garde l'interface disponible hors ligne. Il
+  n'est actif qu'en production (`npm run build` puis `npm run preview` pour le
+  tester).
+
+Les comptages de caisse conservent l'heure du comptage sur l'appareil (`counted_at`).
+
+Les données locales sont séparées par utilisateur. Une opération rejouée prend
+l'heure du serveur au moment de la synchronisation, et non l'heure à laquelle
+elle a été faite hors ligne.
+
 ## Limites opérationnelles
 
 Un appareil hors ligne valide la vente avec son catalogue local affiché, mais ne

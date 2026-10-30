@@ -1,6 +1,9 @@
+import { Save, UserPlus, X } from 'lucide-react'
+import { TableRowsSkeleton } from '../components/Skeleton'
 import { useEffect, useState, type FormEvent } from 'react'
 import { PageHeader } from '../components/PageHeader'
 import { useAuth } from '../contexts/AuthContext'
+import { cachedRead } from '../lib/offline/wrap'
 import { getSupabaseClient, isLocalDbConfigured } from '../lib/supabase'
 import { localApi } from '../lib/localApi'
 
@@ -19,6 +22,7 @@ export function UsersPage() {
   const [users, setUsers] = useState<any[]>([])
   const [roles, setRoles] = useState<any[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
   const [notice, setNotice] = useState<string | null>(null)
   const [showAddForm, setShowAddForm] = useState(false)
   const [newUser, setNewUser] = useState<NewUserInput>(emptyUser)
@@ -30,27 +34,24 @@ export function UsersPage() {
   
   const loadData = async () => {
     try {
-      if (isLocalDbConfigured) {
-        const data = await localApi.getManagedUsers()
-        setUsers(data.users)
-        setRoles(data.roles)
-        return
-      }
-      const client = getSupabaseClient()
-      
-      const [usersData, rolesData] = await Promise.all([
-        client.from('profiles').select('id, full_name, email, active, role_id, role:roles(code, name)').order('full_name'),
-        client.from('roles').select('*').order('name')
-      ])
-      
-      if (usersData.error) throw usersData.error
-      if (rolesData.error) throw rolesData.error
-      
-      setUsers(usersData.data || [])
-      setRoles(rolesData.data || [])
+      const data = await cachedRead('users', async () => {
+        if (isLocalDbConfigured) return localApi.getManagedUsers()
+        const client = getSupabaseClient()
+
+        const [usersData, rolesData] = await Promise.all([
+          client.from('profiles').select('id, full_name, email, active, role_id, role:roles(code, name)').order('full_name'),
+          client.from('roles').select('*').order('name')
+        ])
+
+        if (usersData.error) throw usersData.error
+        if (rolesData.error) throw rolesData.error
+        return { users: (usersData.data || []) as any[], roles: (rolesData.data || []) as any[] }
+      }, { style: 'throw' })
+      setUsers(data.users as any)
+      setRoles(data.roles as any)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Erreur de chargement')
-    } finally { /* keep current data visible during refresh */ }
+    } finally { setLoading(false) }
   }
   
   const toggleActive = async (userId: string, currentActive: boolean) => {
@@ -151,7 +152,7 @@ export function UsersPage() {
       
       <div className="no-print mt-4">
         <button onClick={() => setShowAddForm(true)} className="ui-button-primary">
-          Ajouter un utilisateur
+          <UserPlus className="h-4 w-4" aria-hidden="true" />Ajouter un utilisateur
         </button>
       </div>
       
@@ -196,10 +197,10 @@ export function UsersPage() {
           </div>
           <div className="mt-4 flex gap-3">
             <button type="submit" disabled={submitting} className="ui-button-primary">
-              {submitting ? 'Création...' : 'Créer'}
+              <Save className="h-4 w-4" aria-hidden="true" />{submitting ? 'Création...' : 'Créer'}
             </button>
             <button type="button" onClick={() => { setShowAddForm(false); setNewUser(emptyUser) }} className="ui-button-secondary">
-              Annuler
+              <X className="h-4 w-4" aria-hidden="true" />Annuler
             </button>
           </div>
         </form>
@@ -217,7 +218,7 @@ export function UsersPage() {
             </tr>
           </thead>
           <tbody>
-            {users.length === 0 ? (
+            {loading ? <TableRowsSkeleton cols={5} /> : users.length === 0 ? (
               <tr><td colSpan={5} className="p-6 text-center text-slate-500">Aucun utilisateur</td></tr>
             ) : users.map((user) => (
               <tr key={user.id} className="border-t">

@@ -1,5 +1,6 @@
-import { getSupabaseClient, isLocalDbConfigured } from '../lib/supabase'
+import { getSessionUser, getSupabaseClient, isLocalDbConfigured } from '../lib/supabase'
 import { localApi } from '../lib/localApi'
+import { withOffline } from '../lib/offline/wrap'
 
 export type ExpenseInput = {
   label: string;
@@ -10,7 +11,29 @@ export type ExpenseInput = {
 
 const expensesTable = () => getSupabaseClient().from('expenses')
 
-export const expenseService = {
+export type MonthlyExpenses = { month: string; total: number; count: number }
+
+const service = {
+  /** Expense totals for the last `months` calendar months, oldest first. */
+  getMonthlyTotals: async (months = 6): Promise<MonthlyExpenses[]> => {
+    const now = new Date()
+    const keys = Array.from({ length: months }, (_, index) => { const date = new Date(now.getFullYear(), now.getMonth() - months + 1 + index, 1); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}` })
+    const start = `${keys[0]}-01`
+    const rows = isLocalDbConfigured
+      ? await localApi.query<{ expense_date: string; amount: number }>('select expense_date, amount from expenses where expense_date >= ?', [start])
+      : await (async () => {
+        const { data, error } = await expensesTable().select('expense_date, amount').gte('expense_date', start)
+        if (error) throw error
+        return (data ?? []) as { expense_date: string; amount: number }[]
+      })()
+    const totals = new Map(keys.map((month) => [month, { month, total: 0, count: 0 }]))
+    for (const row of rows) {
+      const bucket = totals.get(String(row.expense_date).slice(0, 7))
+      if (bucket) { bucket.total += Number(row.amount); bucket.count += 1 }
+    }
+    return [...totals.values()]
+  },
+
   getExpenses: async (page: number = 0) => {
     if (isLocalDbConfigured) {
       const offset = page * 20;
@@ -41,7 +64,7 @@ export const expenseService = {
       }).then((data) => ({ data, error: null }))
       .catch((error) => ({ data: null, error }));
     }
-    const { data: { user } } = await getSupabaseClient().auth.getUser()
+    const user = await getSessionUser()
     if (!user) throw new Error('Non authentifié')
     return expensesTable()
       .insert({
@@ -62,3 +85,12 @@ export const expenseService = {
     return expensesTable().delete().eq('id', id)
   },
 }
+
+export const expenseService = withOffline('expenses', service, {
+  throws: ['getMonthlyTotals'],
+  reads: { getExpenses: true, getMonthlyTotals: true },
+  writes: {
+    createExpense: { label: (input: ExpenseInput) => `Dépense « ${input.label} »`, createsId: true, optimistic: (id: string, input: ExpenseInput) => ({ ...input, id, expense_date: input.expense_date || new Date().toISOString().split('T')[0] }) },
+    deleteExpense: { label: 'Suppression d’une dépense' },
+  },
+})

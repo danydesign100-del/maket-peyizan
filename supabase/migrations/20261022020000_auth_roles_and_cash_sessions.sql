@@ -2,7 +2,11 @@
 -- This migration repairs older installations where user_profiles and profiles
 -- could disagree, and moves sensitive cash-register writes into RPCs.
 
-insert into public.profiles (id, full_name, email, role_id, active)
+-- Copy profiles from the legacy user_profiles table, when it exists.
+do $$
+begin
+  if to_regclass('public.user_profiles') is not null then
+    execute $sql$insert into public.profiles (id, full_name, email, role_id, active)
 select
   up.id,
   coalesce(up.full_name, u.email, ''),
@@ -21,7 +25,9 @@ on conflict (id) do update set
   full_name = excluded.full_name,
   email = excluded.email,
   role_id = excluded.role_id,
-  active = excluded.active;
+  active = excluded.active$sql$;
+  end if;
+end $$;
 
 create or replace function public.create_first_admin_user(user_uuid uuid)
 returns jsonb language plpgsql security definer set search_path = public as $$
@@ -37,15 +43,12 @@ begin
     into v_name from auth.users where id = user_uuid;
   if v_name is null then raise exception 'User not found'; end if;
 
-  insert into public.user_profiles (id, full_name, role, is_active)
-  values (user_uuid, v_name, 'owner', true)
-  on conflict (id) do update set full_name = excluded.full_name, role = 'owner', is_active = true;
-
-  update public.profiles
-     set full_name = v_name,
-         active = true,
-         role_id = (select id from public.roles where code = 'director')
-   where id = user_uuid;
+  -- handle_new_user() normally created the profile at sign-up; create it if not.
+  insert into public.profiles (id, full_name, email, role_id, active)
+  select user_uuid, v_name, coalesce(u.email, ''), (select id from public.roles where code = 'director'), true
+  from auth.users u where u.id = user_uuid
+  on conflict (id) do update
+    set full_name = excluded.full_name, active = true, role_id = excluded.role_id;
   return jsonb_build_object('success', true, 'message', 'Owner initialized');
 end;
 $$;
@@ -103,13 +106,16 @@ grant execute on function public.close_cash_session(numeric, text) to authentica
 -- and settings; cashiers, stock managers and accountants retain limited access.
 drop policy if exists "profiles self or administrator read" on public.profiles;
 drop policy if exists "profiles administrator manage" on public.profiles;
+drop policy if exists "profiles staff read" on public.profiles;
 create policy "profiles staff read" on public.profiles for select to authenticated
   using (id = auth.uid() or public.has_role('director') or public.has_role('administrator'));
+drop policy if exists "profiles director manage" on public.profiles;
 create policy "profiles director manage" on public.profiles for update to authenticated
   using ((public.has_role('director') or public.has_role('administrator')) and id <> auth.uid())
   with check ((public.has_role('director') or public.has_role('administrator')) and id <> auth.uid());
 
 drop policy if exists "settings administrator manage" on public.settings;
+drop policy if exists "settings director manage" on public.settings;
 create policy "settings director manage" on public.settings for all to authenticated
   using (public.has_role('director') or public.has_role('administrator'))
   with check (public.has_role('director') or public.has_role('administrator'));

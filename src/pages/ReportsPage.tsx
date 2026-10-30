@@ -1,3 +1,5 @@
+import { BookText, Landmark, Printer, Scale, ShieldCheck, TrendingUp } from 'lucide-react'
+import { TableSkeleton } from '../components/Skeleton'
 import { useEffect, useState } from 'react'
 import { PageHeader } from '../components/PageHeader'
 import { accountingService } from '../services/accountingService'
@@ -83,7 +85,7 @@ export function ReportsPage() {
       
       <div className="no-print mt-4 flex gap-3">
         <button onClick={handlePrint} className="ui-button-secondary">
-          Imprimer le rapport
+          <Printer className="h-4 w-4" aria-hidden="true" />Imprimer le rapport
         </button>
       </div>
       
@@ -91,40 +93,40 @@ export function ReportsPage() {
       <div className="mt-6 flex flex-wrap gap-2 border-b">
         <button
           onClick={() => setTab('trial')}
-          className={`px-4 py-2 ${tab === 'trial' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 ${tab === 'trial' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
         >
-          Balance
+          <Scale className="h-4 w-4" aria-hidden="true" />Balance
         </button>
         <button
           onClick={() => setTab('ledger')}
-          className={`px-4 py-2 ${tab === 'ledger' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 ${tab === 'ledger' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
         >
-          Grand livre
+          <BookText className="h-4 w-4" aria-hidden="true" />Grand livre
         </button>
         <button
           onClick={() => setTab('balance')}
-          className={`px-4 py-2 ${tab === 'balance' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 ${tab === 'balance' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
         >
-          Bilan
+          <Landmark className="h-4 w-4" aria-hidden="true" />Bilan
         </button>
         <button
           onClick={() => setTab('income')}
-          className={`px-4 py-2 ${tab === 'income' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 ${tab === 'income' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
         >
-          Résultat
+          <TrendingUp className="h-4 w-4" aria-hidden="true" />Résultat
         </button>
         {(profile?.role?.code === 'director' || profile?.role?.code === 'administrator') && (
           <button
             onClick={() => setTab('audit')}
-            className={`px-4 py-2 ${tab === 'audit' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
+            className={`inline-flex items-center gap-1.5 px-4 py-2 ${tab === 'audit' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
           >
-            Audit
+            <ShieldCheck className="h-4 w-4" aria-hidden="true" />Audit
           </button>
         )}
       </div>
       
       {loading ? (
-        <div className="mt-6 p-8">Chargement...</div>
+        <TableSkeleton rows={8} cols={4} />
       ) : (
         <div className="mt-6">
           {tab === 'trial' && (

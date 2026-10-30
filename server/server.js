@@ -47,6 +47,25 @@ async function initDatabase() {
   } catch {
     // A database that has not been initialized yet is handled by init-db.js.
   }
+
+  // Cash count logsheet (added after the initial schema): created on start so
+  // that existing local databases gain it without running init-db.js again.
+  db.run(`CREATE TABLE IF NOT EXISTS cash_counts (
+    id TEXT PRIMARY KEY,
+    shift TEXT NOT NULL CHECK (shift IN ('AM', 'PM', 'NIGHT')),
+    direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+    counted_at TEXT NOT NULL,
+    submitted_by TEXT NOT NULL REFERENCES profiles(id),
+    htg TEXT NOT NULL,
+    usd TEXT NOT NULL,
+    htg_total REAL NOT NULL,
+    usd_total REAL NOT NULL,
+    htg_over_short REAL NOT NULL,
+    usd_over_short REAL NOT NULL,
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  db.run('CREATE INDEX IF NOT EXISTS cash_counts_counted_at_idx ON cash_counts(counted_at)');
 }
 
 await initDatabase();
@@ -380,7 +399,7 @@ app.put('/admin/settings/:key', authenticateToken, (req, res) => {
 const operationalReadableTables = new Set([
   'products', 'categories', 'suppliers', 'customers', 'cash_sessions', 'sales',
   'sale_items', 'payments', 'stock_movements', 'proformas', 'proforma_items',
-  'profiles',
+  'profiles', 'cash_counts',
 ]);
 const accountingReadableTables = new Set([
   'accounts', 'accounting_periods', 'journal_entries', 'journal_entry_lines',
@@ -423,7 +442,7 @@ app.post('/query', authenticateToken, (req, res) => {
 
 // Restricted CRUD bridge for the local preview. Table and column names are allow-listed;
 // values are still bound parameters, never concatenated SQL values.
-const editableTables = new Set(['categories', 'customers', 'suppliers', 'products', 'cash_sessions', 'expenses']);
+const editableTables = new Set(['categories', 'customers', 'suppliers', 'products', 'cash_sessions', 'expenses', 'cash_counts']);
 const writableColumns = {
   categories: new Set(['name', 'description', 'active']),
   customers: new Set(['customer_number', 'full_name', 'phone', 'email', 'address', 'company_name', 'tax_id', 'customer_type', 'notes', 'active']),
@@ -431,16 +450,63 @@ const writableColumns = {
   products: new Set(['barcode', 'name', 'brand', 'category_id', 'supplier_id', 'unit', 'purchase_price', 'selling_price', 'proforma_price', 'minimum_stock', 'image_url', 'expiration_date', 'description', 'active']),
   cash_sessions: new Set(['opened_by', 'opening_amount', 'notes', 'closed_at', 'closing_amount']),
   expenses: new Set(['label', 'amount', 'expense_date', 'notes', 'created_by']),
+  cash_counts: new Set(['shift', 'direction', 'counted_at', 'submitted_by', 'htg', 'usd', 'htg_total', 'usd_total', 'htg_over_short', 'usd_over_short', 'notes']),
 };
+
+// Same denominations and formulas as src/lib/cashCount.ts. Totals sent by the
+// browser are ignored and recomputed here.
+const CASH_DENOMINATIONS = {
+  htg: ['5', '10', '25', '50', '100', '250', '500', '1000'],
+  usd: ['0.01', '0.05', '0.1', '0.25', '1', '5', '10', '20', '50', '100'],
+};
+const CASH_AMOUNT_FIELDS = ['rolled_coins', 'checks', 'paid_outs', 'deposit', 'bank_till'];
+const cents = (value) => Math.round(value * 100) / 100;
+function normalizeCashCurrency(raw, currency) {
+  const detail = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!detail || typeof detail !== 'object') throw new Error('Invalid cash count detail');
+  const counts = {};
+  for (const [key, quantity] of Object.entries(detail.counts ?? {})) {
+    if (!CASH_DENOMINATIONS[currency].includes(key)) throw new Error(`Invalid ${currency.toUpperCase()} denomination`);
+    if (!Number.isInteger(quantity) || quantity < 0) throw new Error('Invalid cash count quantity');
+    if (quantity > 0) counts[key] = quantity;
+  }
+  const clean = { counts };
+  for (const field of CASH_AMOUNT_FIELDS) {
+    const amount = Number(detail[field] ?? 0);
+    if (!Number.isFinite(amount) || amount < 0) throw new Error(`Invalid ${field}`);
+    clean[field] = cents(amount);
+  }
+  const cash = Object.entries(counts).reduce((sum, [key, quantity]) => sum + Number(key) * quantity, 0);
+  const total = cents(cash + clean.rolled_coins + clean.checks + clean.paid_outs);
+  return { detail: JSON.stringify(clean), total, overShort: cents(total - clean.deposit - clean.bank_till) };
+}
+function normalizeCashCount(values) {
+  if (!['AM', 'PM', 'NIGHT'].includes(values.shift) || !['in', 'out'].includes(values.direction)) throw new Error('Invalid shift');
+  const countedAt = new Date(values.counted_at);
+  if (Number.isNaN(countedAt.getTime()) || countedAt.getTime() > Date.now() + 5 * 60_000) throw new Error('Invalid count time');
+  const htg = normalizeCashCurrency(values.htg, 'htg');
+  const usd = normalizeCashCurrency(values.usd, 'usd');
+  return {
+    shift: values.shift, direction: values.direction, counted_at: countedAt.toISOString(), submitted_by: values.submitted_by,
+    htg: htg.detail, usd: usd.detail, htg_total: htg.total, usd_total: usd.total, htg_over_short: htg.overShort, usd_over_short: usd.overShort,
+    notes: String(values.notes ?? '').trim().slice(0, 1000) || null,
+  };
+}
 app.post('/data', authenticateToken, (req, res) => {
   try {
-    const { action, table, values, id } = req.body;
+    const { action, table, id } = req.body;
+    let { values } = req.body;
     if (!editableTables.has(table) || !['insert', 'update'].includes(action) || !values || typeof values !== 'object') return res.status(400).json({ error: 'Invalid local data request' });
     const allowed = table === 'customers' ? hasAnyRole(req.user, ['cashier', 'director', 'administrator'])
-      : table === 'cash_sessions' ? canUseCashRegister(req.user)
+      : table === 'cash_sessions' || table === 'cash_counts' ? canUseCashRegister(req.user)
       : table === 'expenses' ? canManageExpenses(req.user)
       : canManageCatalog(req.user);
     if (!allowed) return res.status(403).json({ error: 'Permission denied' });
+    // Cash counts are an audit trail: insert only, by the signed-in agent, totals recomputed.
+    if (table === 'cash_counts') {
+      if (action !== 'insert' || values.submitted_by !== req.user.id) return res.status(403).json({ error: 'Cash counts can only be added by the signed-in agent' });
+      try { values = normalizeCashCount(values); } catch (err) { return res.status(400).json({ error: err.message }); }
+    }
     const columns = Object.keys(values).filter((key) => /^[a-z_]+$/.test(key));
     if (!columns.length) return res.status(400).json({ error: 'No values provided' });
     if (columns.some((column) => !writableColumns[table].has(column))) return res.status(400).json({ error: 'Invalid or protected column' });

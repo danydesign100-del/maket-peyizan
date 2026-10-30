@@ -1,3 +1,5 @@
+import { RefreshCw } from 'lucide-react'
+import { Skeleton, TableSkeleton } from '../components/Skeleton'
 import { useEffect, useState } from 'react'
 import { PageHeader } from '../components/PageHeader'
 import { salesService } from '../services/salesService'
@@ -45,7 +47,7 @@ export function SalesPage() {
     }
   }
   
-  if (loading) return <div className="p-8">Chargement...</div>
+  if (loading) return <div role="status" aria-label="Chargement"><Skeleton className="h-3 w-40" /><Skeleton className="mt-3 h-8 w-56" /><TableSkeleton rows={8} cols={6} /></div>
   
   return (
     <div>
@@ -97,9 +99,9 @@ export function SalesPage() {
                     <button
                       onClick={() => void syncToAccounting(sale.id)}
                       disabled={syncing === sale.id}
-                      className="text-brand-700 hover:text-brand-900 disabled:opacity-50"
+                      className="inline-flex items-center gap-1.5 text-brand-700 hover:text-brand-900 disabled:opacity-50"
                     >
-                      {syncing === sale.id ? '...' : 'Synchroniser'}
+                      <RefreshCw className="h-4 w-4" aria-hidden="true" />{syncing === sale.id ? '...' : 'Synchroniser'}
                     </button>
                   )}
                 </td>

@@ -1,20 +1,24 @@
-import { getSupabaseClient, isLocalDbConfigured } from '../lib/supabase'
+import { getSessionUser, getSupabaseClient, isLocalDbConfigured } from '../lib/supabase'
 import { localApi } from '../lib/localApi'
 import type { CartItem, CashSessionInput, SaleInput } from '../types/pos'
+import type { Product } from '../types/catalog'
 import { enqueueSale } from './offlineSales'
-import { syncPendingSales } from './syncService'
+import { pushChanges } from './syncService'
+import { withOffline } from '../lib/offline/wrap'
+import { readCache, writeCache } from '../lib/offline/cache'
+import { getSnapshot, patchSnapshot } from '../lib/offline/snapshot'
 
 const cashSessionsTable = () => getSupabaseClient().from('cash_sessions')
 const salesTable = () => getSupabaseClient().from('sales')
 
-export const posService = {
+const service = {
   getCurrentSession: async () => {
     if (isLocalDbConfigured) {
       const profile = await localApi.getProfile()
       const rows = await localApi.query('select * from cash_sessions where opened_by = ? and closed_at is null order by opened_at desc limit 1', [profile.id])
       return rows[0] ?? null
     }
-    const { data: { user } } = await getSupabaseClient().auth.getUser()
+    const user = await getSessionUser()
     if (!user) throw new Error('Non authentifie')
 
     const { data, error } = await cashSessionsTable()
@@ -65,7 +69,7 @@ export const posService = {
       const rows = await localApi.query('select s.*, c.full_name as customer_name from sales s left join customers c on c.id = s.customer_id where s.created_by = ? and s.sold_at >= ? order by s.sold_at desc', [profile.id, (session as { opened_at: string }).opened_at])
       return { data: rows, error: null }
     }
-    const { data: { user } } = await getSupabaseClient().auth.getUser()
+    const user = await getSessionUser()
     if (!user) return { data: [], error: null }
     return salesTable()
       .select('*, customer:customers(full_name)')
@@ -88,7 +92,11 @@ export const posService = {
     })
     // Offline-first: persist the sale before any network request, then sync in background.
     const localSale = await enqueueSale(input)
-    void syncPendingSales()
+    await patchSnapshot<Product>('products', (rows) => rows.map((product) => {
+      const sold = input.items.filter((item) => item.productId === product.id).reduce((sum, item) => sum + item.quantity, 0)
+      return sold ? { ...product, stock_quantity: Number(product.stock_quantity) - sold } : product
+    }))
+    void pushChanges().catch(() => undefined)
     return { id: localSale.clientSaleId, sale_number: `LOCAL-${localSale.clientSaleId.slice(0, 8)}`, sync_state: localSale.state }
   },
 
@@ -115,3 +123,41 @@ export const posService = {
       .order('sold_at', { ascending: false })
   },
 }
+
+// Same key as the cached read of getCurrentSession(), which takes no arguments.
+const CURRENT_SESSION_KEY = 'pos.getCurrentSession:[]'
+
+export const posService = withOffline('pos', service, {
+  throws: ['getCurrentSession', 'openSession', 'closeSession', 'createSale'],
+  reads: {
+    getCurrentSession: true,
+    getSessionSales: true,
+    getTodaySales: true,
+    findProductByBarcode: { fallback: async (barcode: string) => {
+      const rows = await getSnapshot<Product>('products')
+      return rows && { data: rows.find((product) => product.barcode === barcode && product.active) ?? null, error: null }
+    } },
+  },
+  writes: {
+    // Supabase sales are already queued by createSale itself; this covers the local server being unreachable.
+    createSale: { label: (input: SaleInput) => `Vente de ${input.items.length} article(s)`, createsId: true, optimistic: async (id: string, input: SaleInput) => {
+      await patchSnapshot<Product>('products', (rows) => rows.map((product) => {
+        const sold = input.items.filter((item) => item.productId === product.id).reduce((sum, item) => sum + item.quantity, 0)
+        return sold ? { ...product, stock_quantity: Number(product.stock_quantity) - sold } : product
+      }))
+      return { id, sale_number: `LOCAL-${id.slice(6, 14)}`, sync_state: 'pending_sync' }
+    } },
+    openSession: { label: 'Ouverture de caisse', createsId: true, optimistic: async (id: string, input: CashSessionInput) => {
+      if ((await readCache(CURRENT_SESSION_KEY))?.value) throw new Error('Une session de caisse est deja ouverte')
+      const session = { id, opening_amount: input.opening_amount, notes: input.notes ?? null, opened_at: new Date().toISOString(), closed_at: null, offline: true }
+      await writeCache(CURRENT_SESSION_KEY, session)
+      return session
+    } },
+    closeSession: { label: 'Fermeture de caisse', optimistic: async (_tempId: string, closingAmount: number) => {
+      const session = (await readCache<Record<string, unknown> | null>(CURRENT_SESSION_KEY))?.value
+      if (!session) throw new Error('Aucune session de caisse ouverte')
+      await writeCache(CURRENT_SESSION_KEY, null)
+      return { ...session, closing_amount: closingAmount, closed_at: new Date().toISOString() }
+    } },
+  },
+})

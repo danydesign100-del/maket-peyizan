@@ -1,3 +1,7 @@
+import { Ban, Eye, EyeOff, FileSpreadsheet, Pencil, Plus, RotateCcw, Save, X } from 'lucide-react'
+import { ImportDialog } from '../components/ImportDialog'
+import { productImporter } from '../services/importers'
+import { TableRowsSkeleton, TableSkeleton } from '../components/Skeleton'
 import { useEffect, useState, type FormEvent } from 'react'
 import { categoryService } from '../services/categoryService'
 import { productService, type ProductFilters } from '../services/productService'
@@ -23,13 +27,15 @@ const empty: ProductInput = {
 }
 
 export function ProductsPage() {
+  const [importing, setImporting] = useState(false)
+
   const { profile } = useAuth()
   const canWrite = ['administrator', 'director', 'stock_manager'].includes(profile?.role?.code ?? '')
   
   const [rows, setRows] = useState<Product[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [suppliers, setSuppliers] = useState<SupplierOption[]>([])
-  const [count, setCount] = useState(0)
+  const [, setCount] = useState(0)
   const [page, setPage] = useState(0)
   const [filters, setFilters] = useState<ProductFilters>({ status: 'active', stock: 'all' })
   const [showInactive, setShowInactive] = useState(false)
@@ -191,12 +197,12 @@ export function ProductsPage() {
           <p className="mt-1 text-slate-600">Catalogue de produits</p>
         </div>
         {canWrite && (
-          <button 
+          <div className="flex flex-wrap gap-2"><button type="button" onClick={() => setImporting(true)} className="ui-button-secondary"><FileSpreadsheet className="h-4 w-4" aria-hidden="true" />Importer</button><button 
             onClick={() => { setForm(empty); setEditing(null); setImage(null); setOpen(true); setFormError(null) }} 
             className="ui-button-primary"
           >
-            Ajouter un produit
-          </button>
+            <Plus className="h-4 w-4" aria-hidden="true" />Ajouter un produit
+          </button></div>
         )}
       </div>
       
@@ -235,7 +241,7 @@ export function ProductsPage() {
           onClick={() => { setShowInactive(!showInactive); if (!showInactive) { setInactiveLoading(true); productService.getProducts(0, { status: 'inactive' }).then(({ data }) => { setInactiveProducts(data as unknown as Product[]); setInactiveLoading(false) }) } }} 
           className="ui-button-secondary"
         >
-          {showInactive ? 'Masquer les inactifs' : 'Voir les inactifs'}
+          {showInactive ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}{showInactive ? 'Masquer les inactifs' : 'Voir les inactifs'}
         </button>
       </div>
       
@@ -433,14 +439,14 @@ export function ProductsPage() {
           
           <div className="mt-6 flex gap-3">
             <button type="submit" disabled={submitting} className="ui-button-primary">
-              {submitting ? 'Enregistrement...' : editing ? 'Modifier' : 'Créer'}
+              <Save className="h-4 w-4" aria-hidden="true" />{submitting ? 'Enregistrement...' : editing ? 'Modifier' : 'Créer'}
             </button>
             <button 
               type="button" 
               onClick={() => { setOpen(false); setForm(empty); setEditing(null); setImage(null); setFormError(null) }} 
               className="ui-button-secondary"
             >
-              Annuler
+              <X className="h-4 w-4" aria-hidden="true" />Annuler
             </button>
           </div>
         </form>
@@ -461,7 +467,7 @@ export function ProductsPage() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={canWrite ? 6 : 5} className="p-6 text-center">Chargement...</td></tr>
+              <TableRowsSkeleton rows={8} cols={canWrite ? 6 : 5} />
             ) : rows.length === 0 ? (
               <tr><td colSpan={canWrite ? 6 : 5} className="p-6 text-center text-slate-500">Aucun produit</td></tr>
             ) : rows.map((product) => (
@@ -485,9 +491,9 @@ export function ProductsPage() {
                 {canWrite && (
                   <td className="p-3">
                     <div className="flex gap-2">
-                      <button onClick={() => edit(product)} className="text-brand-700 hover:underline">Modifier</button>
+                      <button onClick={() => edit(product)} className="inline-flex items-center gap-1.5 text-brand-700 hover:underline"><Pencil className="h-4 w-4" aria-hidden="true" />Modifier</button>
                       {product.active && (
-                        <button onClick={() => void deactivate(product)} className="text-red-600 hover:underline">Désactiver</button>
+                        <button onClick={() => void deactivate(product)} className="inline-flex items-center gap-1.5 text-red-600 hover:underline"><Ban className="h-4 w-4" aria-hidden="true" />Désactiver</button>
                       )}
                     </div>
                   </td>
@@ -505,7 +511,7 @@ export function ProductsPage() {
           <p className="mt-1 text-sm text-slate-600">Produits désactivés qui peuvent être réactivés</p>
           
           {inactiveLoading ? (
-            <p className="mt-4 text-center text-slate-500">Chargement...</p>
+            <TableSkeleton rows={3} cols={4} className="mt-4" />
           ) : inactiveProducts.length === 0 ? (
             <p className="mt-4 text-center text-slate-500">Aucun produit inactif</p>
           ) : (
@@ -532,9 +538,9 @@ export function ProductsPage() {
                         {canWrite && (
                           <button 
                             onClick={() => void activate(product)} 
-                            className="text-brand-700 hover:underline"
+                            className="inline-flex items-center gap-1.5 text-brand-700 hover:underline"
                           >
-                            Réactiver
+                            <RotateCcw className="h-4 w-4" aria-hidden="true" />Réactiver
                           </button>
                         )}
                       </td>
@@ -546,6 +552,6 @@ export function ProductsPage() {
           )}
         </div>
       )}
-    </section>
+{importing && <ImportDialog importer={productImporter} onClose={() => setImporting(false)} onDone={(imported) => { setNotice(`${imported} produit(s) importé(s).`); void load() }} />}    </section>
   )
 }

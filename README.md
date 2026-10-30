@@ -23,6 +23,26 @@ Le secret JWT du serveur local doit être défini dans l'environnement. Il est
 obligatoire en production. Ne jamais placer une clé `service_role` Supabase
 dans le navigateur.
 
+## Installer l'application (ordinateur, téléphone, tablette)
+
+Une fois le site publié en HTTPS, l'application s'installe comme un logiciel et
+fonctionne hors ligne :
+
+- **Chrome / Edge (Windows, Mac, Android)** : bouton « Installer l'application »
+  dans le menu latéral ou sur la page de connexion (ou l'icône d'installation de
+  la barre d'adresse). L'application apparaît dans le menu Démarrer, le Dock ou
+  l'écran d'accueil.
+- **iPhone / iPad (Safari)** : Partager → « Sur l'écran d'accueil ». Le bouton de
+  l'application affiche ces étapes.
+- **Safari sur Mac** : Fichier → « Ajouter au Dock ».
+
+À l'installation, toute l'application est téléchargée (`sw/service-worker.js`,
+complété au build par `vite.config.ts`). Se connecter une première fois avec
+Internet enregistre aussi les données sur l'appareil. Quand une nouvelle version
+est publiée, un message « Nouvelle version disponible » propose la mise à jour
+sans interrompre une vente. Le service worker n'est actif qu'en production
+(`npm run build`, puis `npm run preview` pour tester).
+
 ## Qualité
 
 - Vérification : `npm run lint`

@@ -1,8 +1,10 @@
+import { ArrowLeft, LogIn, Mail } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { isSupabaseConfigured, isLocalDbConfigured, supabase } from '../lib/supabase'
 import { isInitialSetupComplete, signUpFirstOwner } from '../services/authService'
+import { InstallButton } from '../components/InstallApp'
 
 export function LoginPage() {
   const { session, signIn } = useAuth()
@@ -119,7 +121,7 @@ export function LoginPage() {
         <p className="text-sm text-white/45">Accès réservé au personnel autorisé.</p>
       </section>
       
-      <section className="grid place-items-center p-5 sm:p-8">
+      <section className="flex flex-col items-center justify-center p-5 sm:p-8">
         {resetMode ? (
           <form onSubmit={handlePasswordReset} className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-lg shadow-slate-900/5 sm:p-8">
             <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brand-700">Récupération</p>
@@ -141,16 +143,16 @@ export function LoginPage() {
             {error && <p role="alert" className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}
             {notice && <p className="mt-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}
             
-            <button disabled={resetSubmitting} className="mt-6 w-full rounded-lg bg-brand-700 px-4 py-3 font-semibold text-white disabled:opacity-50">
-              {resetSubmitting ? 'Traitement…' : 'Envoyer le lien de récupération'}
+            <button disabled={resetSubmitting} className="inline-flex items-center gap-1.5 justify-center mt-6 w-full rounded-lg bg-brand-700 px-4 py-3 font-semibold text-white disabled:opacity-50">
+              <Mail className="h-4 w-4" aria-hidden="true" />{resetSubmitting ? 'Traitement…' : 'Envoyer le lien de récupération'}
             </button>
             
             <button
               type="button"
               onClick={() => { setResetMode(false); setError(null); setNotice(null) }}
-              className="mt-3 w-full text-sm font-semibold text-brand-700 hover:underline"
+              className="inline-flex items-center gap-1.5 justify-center mt-3 w-full text-sm font-semibold text-brand-700 hover:underline"
             >
-              Retour à la connexion
+              <ArrowLeft className="h-4 w-4" aria-hidden="true" />Retour à la connexion
             </button>
           </form>
         ) : (
@@ -183,8 +185,8 @@ export function LoginPage() {
                 {error && <p role="alert" className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}
                 {notice && <p className="mt-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}
                 
-                <button disabled={submitting} className="mt-6 w-full rounded-lg bg-brand-700 px-4 py-3 font-semibold text-white disabled:opacity-50">
-                  {submitting ? 'Traitement…' : createMode ? 'Créer mon compte administrateur' : 'Se connecter'}
+                <button disabled={submitting} className="inline-flex items-center gap-1.5 justify-center mt-6 w-full rounded-lg bg-brand-700 px-4 py-3 font-semibold text-white disabled:opacity-50">
+                  <LogIn className="h-4 w-4" aria-hidden="true" />{submitting ? 'Traitement…' : createMode ? 'Créer mon compte administrateur' : 'Se connecter'}
                 </button>
                 
                 {!createMode && isSupabaseConfigured && (
@@ -210,6 +212,7 @@ export function LoginPage() {
             )}
           </form>
         )}
+        <div className="mt-4 w-full max-w-md"><InstallButton tone="light" /></div>
       </section>
     </main>
   )

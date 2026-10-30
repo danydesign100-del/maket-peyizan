@@ -238,7 +238,7 @@ COMMENT ON FUNCTION public.validate_journal_entry_balance() IS 'Trigger qui vér
 COMMENT ON FUNCTION public.generate_sale_journal_entry(UUID) IS 'Génère automatiquement l''écriture comptable pour une vente';
 COMMENT ON FUNCTION public.sync_sale_to_accounting(UUID) IS 'RPC accessible depuis frontend pour synchroniser une vente';
 COMMENT ON FUNCTION public.post_journal_entry(UUID) IS 'Valide (poste) une écriture comptable en brouillon';
-COMMENT ON FUNCTION public.log_audit() IS 'Enregistre une action dans le journal d''audit';
+COMMENT ON FUNCTION public.log_audit(TEXT, TEXT, UUID, JSONB, JSONB, BOOLEAN, TEXT) IS 'Enregistre une action dans le journal d''audit';
 
 COMMENT ON VIEW public.general_ledger IS 'Grand livre - Vue consolidée de toutes les écritures comptables';
 COMMENT ON VIEW public.trial_balance IS 'Balance des comptes - Soldes débiteurs et créditeurs par compte';

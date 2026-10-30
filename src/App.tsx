@@ -19,6 +19,7 @@ import { StockMovementsPage } from './pages/StockMovementsPage'
 import { AccountingPage } from './pages/AccountingPage'
 import { ExpensesPage } from './pages/ExpensesPage'
 import { DailyReceiptsPage } from './pages/DailyReceiptsPage'
+import { CashCountPage } from './pages/CashCountPage'
 
 export default function App() {
   return (
@@ -46,6 +47,9 @@ export default function App() {
           <Route path="ventes" element={<SalesPage />} />
           <Route element={<ProtectedRoute roles={['director', 'administrator', 'cashier']} />}>
             <Route path="recettes-journalieres" element={<DailyReceiptsPage />} />
+          </Route>
+          <Route element={<ProtectedRoute roles={['director', 'administrator', 'cashier', 'accountant']} />}>
+            <Route path="comptage-caisse" element={<CashCountPage />} />
           </Route>
           <Route element={<ProtectedRoute roles={['director', 'administrator', 'stock_manager']} />}>
             <Route path="fournisseurs" element={<SuppliersPage />} />

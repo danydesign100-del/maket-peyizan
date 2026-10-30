@@ -1,3 +1,5 @@
+import { BookOpen, Check, NotebookPen, Printer, Scale } from 'lucide-react'
+import { TableSkeleton } from '../components/Skeleton'
 import { useEffect, useState } from 'react'
 import { PageHeader } from '../components/PageHeader'
 import { accountingService } from '../services/accountingService'
@@ -81,7 +83,7 @@ export function AccountingPage() {
       
       <div className="no-print mt-4 flex gap-3">
         <button onClick={handlePrint} className="ui-button-secondary">
-          Imprimer le rapport
+          <Printer className="h-4 w-4" aria-hidden="true" />Imprimer le rapport
         </button>
       </div>
       
@@ -89,26 +91,26 @@ export function AccountingPage() {
       <div className="mt-6 flex gap-2 border-b">
         <button
           onClick={() => setTab('accounts')}
-          className={`px-4 py-2 ${tab === 'accounts' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 ${tab === 'accounts' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
         >
-          Plan comptable
+          <BookOpen className="h-4 w-4" aria-hidden="true" />Plan comptable
         </button>
         <button
           onClick={() => setTab('entries')}
-          className={`px-4 py-2 ${tab === 'entries' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 ${tab === 'entries' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
         >
-          Écritures
+          <NotebookPen className="h-4 w-4" aria-hidden="true" />Écritures
         </button>
         <button
           onClick={() => setTab('trial')}
-          className={`px-4 py-2 ${tab === 'trial' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
+          className={`inline-flex items-center gap-1.5 px-4 py-2 ${tab === 'trial' ? 'border-b-2 border-brand-700 font-semibold' : ''}`}
         >
-          Balance
+          <Scale className="h-4 w-4" aria-hidden="true" />Balance
         </button>
       </div>
       
       {loading ? (
-        <div className="mt-6 p-8">Chargement...</div>
+        <TableSkeleton rows={8} cols={5} />
       ) : (
         <div className="mt-6">
           {tab === 'accounts' && (
@@ -174,9 +176,9 @@ export function AccountingPage() {
                         {entry.status === 'draft' && (
                           <button
                             onClick={() => void postEntry(entry.id)}
-                            className="text-brand-700 hover:text-brand-900"
+                            className="inline-flex items-center gap-1.5 text-brand-700 hover:text-brand-900"
                           >
-                            Valider
+                            <Check className="h-4 w-4" aria-hidden="true" />Valider
                           </button>
                         )}
                       </td>

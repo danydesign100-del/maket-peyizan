@@ -5,12 +5,11 @@ declare current_stock numeric(14,3); delta numeric(14,3);
 begin
   select stock_quantity into current_stock from public.products where id = new.product_id for update;
   if current_stock is null then raise exception 'Product not found'; end if;
-  delta := case
-    when new.movement_type in ('entry', 'customer_return') then new.quantity
-    when new.movement_type in ('exit', 'supplier_return') then -new.quantity
-    when new.movement_type = 'adjustment' then new.quantity
-    else raise exception 'Invalid movement type'
-  end;
+  -- RAISE is a statement, not an expression, so it cannot sit inside CASE.
+  if new.movement_type in ('entry', 'customer_return', 'adjustment') then delta := new.quantity;
+  elsif new.movement_type in ('exit', 'supplier_return') then delta := -new.quantity;
+  else raise exception 'Invalid movement type';
+  end if;
   if new.movement_type <> 'adjustment' and new.quantity <= 0 then raise exception 'Quantity must be positive'; end if;
   if new.movement_type = 'adjustment' and new.quantity = 0 then raise exception 'Adjustment cannot be zero'; end if;
   if current_stock + delta < 0 then raise exception 'Insufficient stock'; end if;
