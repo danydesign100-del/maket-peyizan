@@ -65,10 +65,19 @@
 @media print {
   @page { size: letter portrait; margin: 0.5in; }
   .no-print { display: none !important; }
+  .print-hidden { display: none !important; }
+  /* Report tables: keep every column on the page, with readable figures. */
+  .report-table { font-size: 8.5pt; }
+  .report-table th, .report-table td { padding: 3pt 5pt !important; }
+  .report-table td { white-space: nowrap; }
   .print-only { display: block !important; }
+  /* Printing one document hides the others, even print-only ones (A4 copy beside an 80 mm ticket). */
+  .print-only.print-hidden { display: none !important; }
   body { background: white; color: #111827; font-size: 10pt; }
-  table { break-inside: avoid; width: 100%; }
+  /* Rows never split; a table itself may start under its title and continue on the next page. */
+  table { width: 100%; }
   thead { display: table-header-group; }
-  tfoot { display: table-footer-group; }
+  /* Totals print once, after the last row (a repeated footer would read as a page subtotal). */
+  tfoot { display: table-row-group; }
   tr { break-inside: avoid; }
 }

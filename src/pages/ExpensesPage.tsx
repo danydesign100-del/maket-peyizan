@@ -1,4 +1,6 @@
-import { ChevronLeft, ChevronRight, FileSpreadsheet, Plus, Save, Trash2, X } from 'lucide-react'
+import { Ban, ChevronLeft, ChevronRight, FileSpreadsheet, Plus, Save, X } from 'lucide-react'
+import { Modal } from '../components/Modal'
+import { errorText } from '../lib/errors'
 import { ImportDialog } from '../components/ImportDialog'
 import { expenseImporter } from '../services/importers'
 import { Skeleton, TableRowsSkeleton } from '../components/Skeleton'
@@ -7,6 +9,9 @@ import { PageHeader } from '../components/PageHeader'
 import { expenseService, type ExpenseInput, type MonthlyExpenses } from '../services/expenseService'
 import { ColumnChart } from '../components/charts/ColumnChart'
 import { useAuth } from '../contexts/AuthContext'
+import { isLocalDbConfigured } from '../lib/supabase'
+import { ledgerService } from '../services/ledgerService'
+import type { Account } from '../types/accounting'
 
 const emptyExpense: ExpenseInput = { label: '', amount: 0, expense_date: '', notes: '' }
 
@@ -15,8 +20,8 @@ const formatAmount = (value: number) => new Intl.NumberFormat('fr-HT', { style: 
 export function ExpensesPage() {
   const [importing, setImporting] = useState(false)
 
-  const { profile } = useAuth()
-  const canManage = profile?.role?.code === 'director' || profile?.role?.code === 'administrator' || profile?.role?.code === 'accountant'
+  const { can } = useAuth()
+  const canManage = can('expenses.manage')
   
   const [expenses, setExpenses] = useState<any[]>([])
   const [count, setCount] = useState(0)
@@ -28,6 +33,12 @@ export function ExpensesPage() {
   const [open, setOpen] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [monthly, setMonthly] = useState<MonthlyExpenses[] | null>(null)
+  const [accounts, setAccounts] = useState<Account[]>([])
+  // Online, each expense is posted to the chosen accounts (charge / means of payment).
+  useEffect(() => { if (!isLocalDbConfigured) void ledgerService.listAccounts().then(({ data }) => setAccounts(data ?? [])) }, [])
+  const expenseAccounts = accounts.filter((account) => account.account_type === 'expense' && account.statement_group === 'expense' && account.is_active)
+  const paymentAccounts = accounts.filter((account) => account.account_type === 'asset' && account.code.startsWith('10') && account.is_active)
+  const defaultId = (list: Account[], code: string) => list.find((account) => account.code === code)?.id ?? ''
 
   const load = async () => {
     setLoading(true)
@@ -55,7 +66,9 @@ export function ExpensesPage() {
     setSubmitting(true)
     setError(null)
     try {
-      const { error: requestError } = await expenseService.createExpense(form)
+      // The dropdowns show a default before any choice: send it explicitly.
+      const accountsChosen = accounts.length ? { expense_account_id: form.expense_account_id || defaultId(expenseAccounts, '518000') || null, payment_account_id: form.payment_account_id || defaultId(paymentAccounts, '101000') || null } : {}
+      const { error: requestError } = await expenseService.createExpense({ ...form, ...accountsChosen })
       if (requestError) throw requestError
       setNotice('Dépense enregistrée')
       setOpen(false)
@@ -68,16 +81,17 @@ export function ExpensesPage() {
     }
   }
 
-  const deleteExpense = async (id: string) => {
-    if (!confirm('Supprimer cette dépense ?')) return
-    try {
-      const { error: requestError } = await expenseService.deleteExpense(id)
-      if (requestError) throw requestError
-      setNotice('Dépense supprimée')
-      void load()
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Impossible de supprimer')
-    }
+  const [cancelling, setCancelling] = useState<{ id: string; label: string; amount: number } | null>(null)
+  const [cancelReason, setCancelReason] = useState('')
+  const [cancelError, setCancelError] = useState<string | null>(null)
+  const cancelExpense = async () => {
+    if (!cancelling) return
+    if (cancelReason.trim().length < 3) return setCancelError('Indiquez le motif de l’annulation.')
+    const { error: requestError } = await expenseService.cancelExpense(cancelling.id, cancelReason.trim())
+    if (requestError) return setCancelError(errorText(requestError))
+    setNotice(`Dépense « ${cancelling.label} » annulée : son écriture est annulée, la dépense reste visible.`)
+    setCancelling(null); setCancelReason(''); setCancelError(null)
+    void load()
   }
 
   if (!canManage) {
@@ -158,6 +172,19 @@ export function ExpensesPage() {
             />
           </div>
           
+          {accounts.length > 0 && <>
+            <label className="text-sm font-medium text-slate-700">Compte de charge
+              <select value={form.expense_account_id || defaultId(expenseAccounts, '518000')} onChange={(e) => setForm({ ...form, expense_account_id: e.target.value })} className="mt-1 w-full">
+                {expenseAccounts.map((account) => <option key={account.id} value={account.id}>{account.code} - {account.name}</option>)}
+              </select>
+            </label>
+            <label className="text-sm font-medium text-slate-700">Payé depuis
+              <select value={form.payment_account_id || defaultId(paymentAccounts, '101000')} onChange={(e) => setForm({ ...form, payment_account_id: e.target.value })} className="mt-1 w-full">
+                {paymentAccounts.map((account) => <option key={account.id} value={account.id}>{account.code} - {account.name}</option>)}
+              </select>
+            </label>
+          </>}
+
           <div className="md:col-span-2">
             <label className="block text-sm font-medium text-slate-700">Notes</label>
             <textarea
@@ -188,29 +215,34 @@ export function ExpensesPage() {
               <th>Libellé</th>
               <th>Montant</th>
               <th>Notes</th>
+              {accounts.length > 0 && <th>Compte</th>}
+              {accounts.length > 0 && <th>Comptabilité</th>}
               <th>Créé par</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <TableRowsSkeleton cols={6} />
+              <TableRowsSkeleton cols={accounts.length ? 8 : 6} />
             ) : expenses.length === 0 ? (
-              <tr><td colSpan={6} className="p-6 text-center text-slate-500">Aucune dépense</td></tr>
+              <tr><td colSpan={accounts.length ? 8 : 6} className="p-6 text-center text-slate-500">Aucune dépense</td></tr>
             ) : expenses.map((expense) => (
-              <tr key={expense.id} className="border-t">
+              <tr key={expense.id} className={`border-t ${expense.status === 'cancelled' ? 'text-slate-400' : ''}`}>
                 <td className="p-3">{new Date(`${String(expense.expense_date).slice(0, 10)}T12:00:00`).toLocaleDateString('fr-HT')}</td>
-                <td className="p-3 font-medium">{expense.label}</td>
-                <td className="p-3 font-medium">{Number(expense.amount).toFixed(2)} HTG</td>
-                <td className="p-3 text-slate-600">{expense.notes || '—'}</td>
-                <td className="p-3">{expense.created_by_name || '—'}</td>
+                <td className="p-3"><span className={expense.status === 'cancelled' ? 'line-through' : 'font-medium'}>{expense.label}</span>{expense.status === 'cancelled' && <span className="block text-xs text-red-700">Annulée : {expense.cancel_reason}</span>}</td>
+                <td className={`p-3 font-medium ${expense.status === 'cancelled' ? 'line-through' : ''}`}>{Number(expense.amount).toFixed(2)} HTG</td>
+                <td className="p-3 text-slate-600">{expense.notes || '-'}</td>
+                {accounts.length > 0 && <td className="p-3 whitespace-nowrap text-slate-600">{expense.expense_account ? `${expense.expense_account.code} ${expense.expense_account.name}` : '-'}</td>}
+                {accounts.length > 0 && <td className="p-3 whitespace-nowrap">{expense.journal ? <span className="ui-badge ui-badge-success">{expense.journal.entry_number}</span> : expense.accounting_error ? <span className="ui-badge ui-badge-danger" title={expense.accounting_error}>À comptabiliser</span> : <span className="text-slate-400">-</span>}</td>}
+                <td className="p-3">{expense.created_by_name || '-'}</td>
                 <td className="p-3">
-                  <button
-                    onClick={() => void deleteExpense(expense.id)}
+                  {expense.status !== 'cancelled' && <button
+                    type="button"
+                    onClick={() => { setCancelling({ id: expense.id, label: expense.label, amount: Number(expense.amount) }); setCancelReason(''); setCancelError(null) }}
                     className="inline-flex items-center gap-1.5 text-red-600 hover:text-red-800"
                   >
-                    <Trash2 className="h-4 w-4" aria-hidden="true" />Supprimer
-                  </button>
+                    <Ban className="h-4 w-4" aria-hidden="true" />Annuler
+                  </button>}
                 </td>
               </tr>
             ))}
@@ -241,6 +273,13 @@ export function ExpensesPage() {
           </div>
         </div>
       )}
-{importing && <ImportDialog importer={expenseImporter} onClose={() => setImporting(false)} onDone={(imported) => { setNotice(`${imported} dépense(s) importé(s).`); void load() }} />}    </div>
+{importing && <ImportDialog importer={expenseImporter} onClose={() => setImporting(false)} onDone={(imported) => { setNotice(`${imported} dépense(s) importé(s).`); void load() }} />}
+      {cancelling && <Modal size="sm" title="Annuler la dépense" subtitle={`${cancelling.label} - ${cancelling.amount.toFixed(2)} HTG`} onClose={() => setCancelling(null)}
+        footer={<><button type="button" onClick={() => setCancelling(null)} className="ui-button-secondary">Retour</button><button type="button" onClick={() => void cancelExpense()} className="ui-button-primary bg-red-700 hover:bg-red-800"><Ban className="h-4 w-4" aria-hidden="true" />Annuler la dépense</button></>}>
+        {cancelError && <p role="alert" className="ui-alert-error mt-0 mb-3">{cancelError}</p>}
+        <p className="mb-3 text-sm text-slate-600">Une dépense n’est jamais supprimée : elle reste dans la liste, barrée, et son écriture comptable est annulée avec ce motif.</p>
+        <label className="block text-sm font-medium text-slate-700">Motif *<textarea autoFocus rows={2} value={cancelReason} onChange={(event) => setCancelReason(event.target.value)} className="mt-1 w-full" /></label>
+      </Modal>}
+    </div>
   )
 }

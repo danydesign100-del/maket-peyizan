@@ -36,7 +36,7 @@ const service = {
   },
 
   getAccountById: async (id: string) => {
-    return accountsTable().select('*, parent:accounts(*)').eq('id', id).single()
+    return accountsTable().select('*, parent:accounts!parent_id(*)').eq('id', id).single()
   },
 
   createAccount: async (input: AccountInput) => {
@@ -59,7 +59,7 @@ const service = {
       const rows = await localApi.query<any>(`select ap.*, p.full_name as closed_by_name from accounting_periods ap left join profiles p on p.id = ap.closed_by order by ap.start_date desc`);
       return { data: rows, error: null };
     }
-    return periodsTable().select('*, closed_by:profiles(full_name)').order('start_date', { ascending: false })
+    return periodsTable().select('*, closed_by:profiles!accounting_periods_closed_by_fkey(full_name)').order('start_date', { ascending: false })
   },
 
   getActivePeriod: async () => {
@@ -116,7 +116,7 @@ const service = {
       const rows = await localApi.query<any>(`select je.*, ap.name as period_name, p.full_name as creator_name from journal_entries je left join accounting_periods ap on ap.id = je.period_id left join profiles p on p.id = je.created_by where ${where} order by je.entry_date desc limit 20 offset ?`, [...params, offset]);
       return { data: rows, error: null, count: rows.length };
     }
-    let query = journalEntriesTable().select('*, period:accounting_periods(name), creator:profiles(full_name), poster:profiles(full_name)', { count: 'exact' })
+    let query = journalEntriesTable().select('*, period:accounting_periods(name), creator:profiles!journal_entries_created_by_fkey(full_name), poster:profiles!journal_entries_posted_by_fkey(full_name)', { count: 'exact' })
     if (filters?.periodId) query = query.eq('period_id', filters.periodId)
     if (filters?.status) query = query.eq('status', filters.status)
     if (filters?.fromDate) query = query.gte('entry_date', filters.fromDate)
@@ -127,11 +127,11 @@ const service = {
   },
 
   getJournalEntryById: async (id: string) => {
-    return journalEntriesTable().select('*, period:accounting_periods(name), creator:profiles(full_name), poster:profiles(full_name)').eq('id', id).single()
+    return journalEntriesTable().select('*, period:accounting_periods(name), creator:profiles!journal_entries_created_by_fkey(full_name), poster:profiles!journal_entries_posted_by_fkey(full_name)').eq('id', id).single()
   },
 
   getJournalEntryLines: async (entryId: string) => {
-    return journalEntryLinesTable().select('*, account:accounts(code, name)').eq('journal_entry_id', entryId).order('line_number')
+    return journalEntryLinesTable().select('*, account:accounts!journal_entry_lines_account_id_fkey(code, name)').eq('journal_entry_id', entryId).order('line_number')
   },
 
   createJournalEntry: async (input: JournalEntryInput, lines: JournalEntryLineInput[]) => {
@@ -211,7 +211,7 @@ const service = {
   // Écritures de régularisation
   // ============================================
   getAdjustments: async (filters?: { status?: string; type?: string; page?: number }) => {
-    let query = adjustmentsTable().select('*, period:accounting_periods(name), preparer:profiles(full_name), approver:profiles(full_name)', { count: 'exact' })
+    let query = adjustmentsTable().select('*, period:accounting_periods(name), preparer:profiles!adjustments_prepared_by_fkey(full_name), approver:profiles!adjustments_approved_by_fkey(full_name)', { count: 'exact' })
     if (filters?.status) query = query.eq('status', filters.status)
     if (filters?.type) query = query.eq('adjustment_type', filters.type)
     
@@ -220,7 +220,7 @@ const service = {
   },
 
   getAdjustmentById: async (id: string) => {
-    return adjustmentsTable().select('*, period:accounting_periods(name), preparer:profiles(full_name), approver:profiles(full_name), journal_entry:journal_entries(entry_number)').eq('id', id).single()
+    return adjustmentsTable().select('*, period:accounting_periods(name), preparer:profiles!adjustments_prepared_by_fkey(full_name), approver:profiles!adjustments_approved_by_fkey(full_name), journal_entry:journal_entries!adjustments_journal_entry_id_fkey(entry_number)').eq('id', id).single()
   },
 
   createAdjustment: async (input: AdjustmentInput) => {
@@ -356,7 +356,7 @@ const service = {
       const rows = await localApi.query<any>(`select al.*, p.full_name as profile_name from audit_log al left join profiles p on p.id = al.profile_id where ${where} order by al.created_at desc limit 50 offset ?`, [...params, offset]);
       return { data: rows, error: null, count: rows.length };
     }
-    let query = getSupabaseClient().from('audit_log').select('*, profile:profiles(full_name)', { count: 'exact' })
+    let query = getSupabaseClient().from('audit_log').select('*, profile:profiles!audit_log_profile_id_fkey(full_name)', { count: 'exact' })
     if (filters?.entityType) query = query.eq('entity_type', filters.entityType)
     if (filters?.entityId) query = query.eq('entity_id', filters.entityId)
     if (filters?.action) query = query.eq('action', filters.action)

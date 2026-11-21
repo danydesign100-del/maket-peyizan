@@ -1,26 +1,64 @@
-import { Plus, Save, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Eye, Plus } from 'lucide-react'
+import { PageHeader } from '../components/PageHeader'
 import { TableRowsSkeleton } from '../components/Skeleton'
-import { useEffect, useMemo, useState } from 'react'
-import { customerService } from '../services/customerService'
-import { productService } from '../services/productService'
-import { proformaService, type ProformaItemInput, type ProformaStatus } from '../services/proformaService'
+import { useAuth } from '../contexts/AuthContext'
+import { errorText } from '../lib/errors'
+import { formatDay } from '../lib/period'
+import { PROFORMA_STATUS_LABELS, proformaService, type Proforma, type ProformaStatus } from '../services/proformaService'
+import { ProformaDetail } from './proformas/ProformaDetail'
+import { ProformaEditor } from './proformas/ProformaEditor'
 
-type Product = { id: string; name: string; proforma_price: number | string; selling_price: number | string; stock_quantity: number | string; unit: string }
-type Customer = { id: string; full_name: string }
-type Row = { id: string; proforma_number: string; customer?: { full_name: string } | null; status: ProformaStatus; issue_date: string; valid_until: string | null; total_amount: number | string; items?: ProformaItemInput[] }
-const money = (value: number) => new Intl.NumberFormat('fr-HT', { style: 'currency', currency: 'HTG' }).format(value)
-const labels: Record<ProformaStatus, string> = { draft: 'Brouillon', sent: 'Envoyée', accepted: 'Acceptée', cancelled: 'Annulée', expired: 'Expirée' }
+const money = (value: number) => `${Number(value).toLocaleString('fr-HT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} HTG`
+const STATUS_TONE: Record<ProformaStatus, string> = { draft: 'ui-badge-neutral', sent: 'ui-badge-warning', accepted: 'ui-badge-success', cancelled: 'ui-badge-danger', expired: 'ui-badge-neutral', converted: 'ui-badge-success' }
 
 export function ProformasPage() {
-  const [rows, setRows] = useState<Row[]>([]); const [products, setProducts] = useState<Product[]>([]); const [customers, setCustomers] = useState<Customer[]>([])
-  const [open, setOpen] = useState(false); const [loading, setLoading] = useState(true); const [saving, setSaving] = useState(false); const [error, setError] = useState<string | null>(null); const [notice, setNotice] = useState<string | null>(null)
-  const [customerId, setCustomerId] = useState(''); const [validUntil, setValidUntil] = useState(''); const [notes, setNotes] = useState(''); const [items, setItems] = useState<ProformaItemInput[]>([])
-  const total = useMemo(() => items.reduce((sum, item) => sum + item.quantity * item.unit_price - (item.discount_amount ?? 0) + (item.tax_amount ?? 0), 0), [items])
-  const load = async () => { setLoading(true); const [proformas, catalog, clientList] = await Promise.all([proformaService.list(), productService.getProducts(0, { status: 'active' }), customerService.getCustomers(0, '', 'active')]); if (proformas.error || catalog.error || clientList.error) setError((proformas.error || catalog.error || clientList.error)?.message ?? 'Erreur de chargement'); else { setRows((proformas.data ?? []) as Row[]); setProducts((catalog.data ?? []) as Product[]); setCustomers((clientList.data ?? []) as Customer[]) } setLoading(false) }
-  useEffect(() => { void load() }, [])
-  const addItem = (productId: string) => { const product = products.find((item) => item.id === productId); if (!product) return; setItems((current) => [...current, { product_id: product.id, description: product.name, quantity: 1, unit_price: Number(product.proforma_price) || Number(product.selling_price), discount_amount: 0, tax_amount: 0 }]) }
-  const updateItem = (index: number, key: keyof ProformaItemInput, value: string | number) => setItems((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, [key]: value } : item))
-  const submit = async (event: React.FormEvent) => { event.preventDefault(); if (!items.length) { setError('Ajoute au moins yon pwodwi nan proforma a.'); return } setSaving(true); setError(null); try { await proformaService.create({ customer_id: customerId || null, valid_until: validUntil || null, notes, items }); setNotice('Proforma a anrejistre.'); setOpen(false); setCustomerId(''); setValidUntil(''); setNotes(''); setItems([]); await load() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Enskripsyon an echwe.') } finally { setSaving(false) } }
-  const changeStatus = async (id: string, status: ProformaStatus) => { setError(null); try { await proformaService.updateStatus(id, status); setNotice('Estati proforma a mete ajou.'); await load() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Mizajou a echwe.') } }
-  return <section><div className="flex flex-wrap items-center justify-between gap-4"><div><h1 className="text-2xl font-bold">Proformas</h1><p className="mt-1 text-slate-600">Kreye epi swiv devis kliyan yo.</p></div><button onClick={() => { setError(null); setOpen(true) }} className="inline-flex items-center gap-1.5 rounded-lg bg-brand-700 px-4 py-2 text-white"><Plus className="h-4 w-4" aria-hidden="true" />Nouvelle proforma</button></div>{notice && <p className="mt-4 rounded bg-emerald-50 p-3 text-emerald-800">{notice}</p>}{error && <p className="mt-4 rounded bg-red-50 p-3 text-red-800">{error}</p>}{open && <form onSubmit={submit} className="mt-6 grid gap-3 rounded-xl bg-white p-5 shadow-sm ring-1 ring-slate-200 md:grid-cols-2"><h2 className="md:col-span-2 text-lg font-semibold">Nouvelle proforma</h2><select value={customerId} onChange={(event) => setCustomerId(event.target.value)} className="rounded border p-2"><option value="">Client non spécifié</option>{customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.full_name}</option>)}</select><input type="date" value={validUntil} onChange={(event) => setValidUntil(event.target.value)} className="rounded border p-2" /><select defaultValue="" onChange={(event) => { addItem(event.target.value); event.currentTarget.value = '' }} className="rounded border p-2 md:col-span-2"><option value="">Ajouter un produit…</option>{products.map((product) => <option key={product.id} value={product.id}>{product.name} — {product.stock_quantity} {product.unit}</option>)}</select>{items.map((item, index) => <div className="grid gap-2 rounded border p-3 md:col-span-2 md:grid-cols-[1fr_90px_120px_90px]" key={`${item.product_id}-${index}`}><span className="self-center font-medium">{item.description}</span><input aria-label="Quantité" type="number" min="0.001" step="0.001" value={item.quantity} onChange={(event) => updateItem(index, 'quantity', Number(event.target.value))} /><input aria-label="Prix unitaire" type="number" min="0" step="0.01" value={item.unit_price} onChange={(event) => updateItem(index, 'unit_price', Number(event.target.value))} /><button type="button" onClick={() => setItems((current) => current.filter((_, itemIndex) => itemIndex !== index))} className="inline-flex items-center gap-1.5 text-red-700"><X className="h-4 w-4" aria-hidden="true" />Retirer</button></div>)}<textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Notes" className="rounded border p-2 md:col-span-2" /><div className="flex items-center justify-between md:col-span-2"><strong>Total: {money(total)}</strong><span className="flex gap-3"><button disabled={saving} className="inline-flex items-center gap-1.5 rounded bg-brand-700 px-4 py-2 text-white disabled:opacity-50"><Save className="h-4 w-4" aria-hidden="true" />{saving ? 'Enregistrement…' : 'Enregistrer'}</button><button type="button" onClick={() => setOpen(false)} className="inline-flex items-center gap-1.5 rounded border px-4 py-2"><X className="h-4 w-4" aria-hidden="true" />Annuler</button></span></div></form>}<div className="mt-6 overflow-x-auto rounded-xl bg-white shadow-sm ring-1 ring-slate-200"><table className="w-full text-left text-sm"><thead className="bg-slate-50 text-slate-600"><tr><th className="p-3">Numéro</th><th className="p-3">Client</th><th className="p-3">Date</th><th className="p-3">Validité</th><th className="p-3">Total</th><th className="p-3">Statut</th></tr></thead><tbody>{loading ? <TableRowsSkeleton cols={6} /> : rows.length === 0 ? <tr><td className="p-6 text-center text-slate-500" colSpan={6}>Aucune proforma.</td></tr> : rows.map((row) => <tr className="border-t" key={row.id}><td className="p-3 font-medium">{row.proforma_number}</td><td className="p-3">{row.customer?.full_name ?? '—'}</td><td className="p-3">{row.issue_date}</td><td className="p-3">{row.valid_until ?? '—'}</td><td className="p-3">{money(Number(row.total_amount))}</td><td className="p-3"><select value={row.status} onChange={(event) => void changeStatus(row.id, event.target.value as ProformaStatus)} className="rounded border px-2 py-1">{Object.entries(labels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></td></tr>)}</tbody></table></div></section>
+  const { can } = useAuth()
+  const canEdit = can('proformas.manage')
+  const canPrice = can('proformas.price')
+  const [rows, setRows] = useState<Proforma[] | null>(null)
+  const [search, setSearch] = useState('')
+  const [status, setStatus] = useState<ProformaStatus | ''>('')
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [viewing, setViewing] = useState<string | null>(null)
+  const [editing, setEditing] = useState<Proforma | null | undefined>(undefined)
+  const [refresh, setRefresh] = useState(0)
+  useEffect(() => {
+    void proformaService.list().then(({ data, error: loadError }) => loadError ? setError(errorText(loadError)) : setRows(((data ?? []) as Proforma[]).map((row) => ({ ...row, items: row.items ?? [] }))))
+  }, [refresh])
+  const done = (message: string) => { setNotice(message); setError(null); setEditing(undefined); setRefresh((value) => value + 1) }
+  const term = search.trim().toLowerCase()
+  const visible = (rows ?? []).filter((row) => (!status || row.status === status) && (!term || row.proforma_number.toLowerCase().includes(term) || row.customer?.full_name.toLowerCase().includes(term)))
+  const current = rows?.find((row) => row.id === viewing) ?? null
+
+  return <section>
+    <PageHeader title="Proformas" description="Devis clients : consultation, modification avec historique, impression et transformation en vente."
+      actions={canEdit && <button type="button" onClick={() => setEditing(null)} className="ui-button-primary"><Plus className="h-4 w-4" aria-hidden="true" />Nouvelle proforma</button>} />
+    {notice && <p role="status" className="ui-alert-success">{notice}</p>}
+    {error && <p role="alert" className="ui-alert-error">{error}</p>}
+    <div className="ui-card mt-6 flex flex-wrap gap-3 p-4">
+      <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="N° de proforma ou client" aria-label="Rechercher" className="min-w-56 flex-1" />
+      <select value={status} onChange={(event) => setStatus(event.target.value as ProformaStatus | '')} aria-label="Statut"><option value="">Tous les statuts</option>{(Object.keys(PROFORMA_STATUS_LABELS) as ProformaStatus[]).map((item) => <option key={item} value={item}>{PROFORMA_STATUS_LABELS[item]}</option>)}</select>
+    </div>
+    <div className="ui-card mt-6 overflow-x-auto">
+      <table className="ui-table text-sm">
+        <thead><tr><th>N°</th><th>Date</th><th>Client</th><th>Validité</th><th className="text-right">Total</th><th>Statut</th><th className="text-right"><span className="sr-only">Ouvrir</span></th></tr></thead>
+        <tbody>
+          {rows === null ? <TableRowsSkeleton cols={7} /> : visible.length === 0 ? <tr><td colSpan={7} className="ui-empty">Aucune proforma.</td></tr>
+            : visible.map((row) => <tr key={row.id}>
+              <td><button type="button" onClick={() => setViewing(row.id)} className="font-mono text-xs font-semibold text-brand-700 hover:underline">{row.proforma_number}</button></td>
+              <td className="whitespace-nowrap">{formatDay(row.issue_date)}</td>
+              <td>{row.customer?.full_name ?? <span className="text-slate-400">Sans client</span>}</td>
+              <td className="whitespace-nowrap">{row.valid_until ? formatDay(row.valid_until) : '-'}</td>
+              <td className="text-right font-semibold tabular-nums">{money(row.total_amount)}</td>
+              <td><span className={`ui-badge ${STATUS_TONE[row.status]}`}>{PROFORMA_STATUS_LABELS[row.status]}</span></td>
+              <td className="text-right"><button type="button" onClick={() => setViewing(row.id)} title="Ouvrir" className="rounded p-1.5 text-slate-500 hover:bg-slate-100 hover:text-brand-700"><Eye className="h-4 w-4" aria-label="Ouvrir" /></button></td>
+            </tr>)}
+        </tbody>
+      </table>
+    </div>
+    {current && <ProformaDetail proforma={current} canEdit={canEdit} canSell={canEdit} onClose={() => setViewing(null)} onEdit={() => { setEditing(current); setViewing(null) }} onChanged={(message) => { done(message) }} />}
+    {editing !== undefined && <ProformaEditor proforma={editing} canPrice={canPrice} onClose={() => setEditing(undefined)} onSaved={done} />}
+  </section>
 }

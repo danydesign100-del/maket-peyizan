@@ -1,4 +1,4 @@
-# Procédure de test Supabase — POS
+# Procédure de test Supabase - POS
 
 Prérequis : la migration `20260918180000_pos_foundation.sql` est appliquée et `.env.local` contient l’URL et la clé anon du même projet.
 

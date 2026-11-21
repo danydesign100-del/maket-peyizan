@@ -28,7 +28,26 @@ function serviceWorker(): Plugin {
   }
 }
 
+/**
+ * Test version (`vite build --mode test`): settings come from .env.test.local
+ * only, and the title and installed app name say TEST so that it cannot be
+ * mistaken for the real shop.
+ */
+function testVersion(): Plugin {
+  let enabled = false
+  return {
+    name: 'maket-test-version',
+    configResolved(config) { enabled = config.mode === 'test' },
+    transformIndexHtml(html) { return enabled ? html.replace('<title>Makèt Peyizan</title>', '<title>[TEST] Makèt Peyizan</title>') : html },
+    generateBundle() {
+      if (!enabled) return
+      const manifest = JSON.parse(readFileSync('public/manifest.webmanifest', 'utf8'))
+      this.emitFile({ type: 'asset', fileName: 'manifest.webmanifest', source: JSON.stringify({ ...manifest, id: '/?test', name: `${manifest.name} (TEST)`, short_name: 'Makèt TEST', theme_color: '#92400e' }, null, 2) })
+    },
+  }
+}
+
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss(), serviceWorker()],
+  plugins: [react(), tailwindcss(), serviceWorker(), testVersion()],
 })

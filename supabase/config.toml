@@ -14,7 +14,7 @@ major_version = 17
 enabled = true
 port = 54323
 
-[inbucket]
+[local_smtp]
 enabled = true
 port = 54324
 
@@ -23,3 +23,8 @@ enabled = true
 site_url = "http://127.0.0.1:5173"
 additional_redirect_urls = ["http://localhost:5173"]
 jwt_expiry_limit = 3600
+
+# Sign-in by user name happens before any session exists: the function checks
+# the caller's token itself for every other action.
+[functions.users]
+verify_jwt = false

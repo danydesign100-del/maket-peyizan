@@ -1,498 +1,330 @@
-import { Banknote, Check, Lock, LockOpen, Plus, Printer, Search, Trash2, X } from 'lucide-react'
+import { ArrowUpRight, Banknote, Lock, LockOpen, Plus, Printer, RotateCcw } from 'lucide-react'
 import { CardsSkeleton, Skeleton, TableSkeleton } from '../components/Skeleton'
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useTicketPrinter } from '../components/ThermalTicket'
+import { errorText } from '../lib/errors'
+import { isOnline } from '../lib/offline/status'
+import { isNetworkError } from '../lib/offline/network'
 import { PageHeader } from '../components/PageHeader'
 import { posService } from '../services/posService'
 import { productService } from '../services/productService'
-import { customerService } from '../services/customerService'
-import type { CartItem, PaymentMethod } from '../types/pos'
-import type { Customer, Product } from '../types/catalog'
+import { pendingSales } from '../services/offlineSales'
+import { readSettings } from '../services/settingsService'
+import { ledgerService } from '../services/ledgerService'
+import type { CartItem, Payment } from '../types/pos'
+import type { Customer, Product, ProductInput } from '../types/catalog'
+import type { Account } from '../types/accounting'
 import { useAuth } from '../contexts/AuthContext'
+import { useLocation, useNavigate } from 'react-router-dom'
+import { proformaService, type Proforma } from '../services/proformaService'
+import { ProductFormDialog } from './products/ProductFormDialog'
+import { MovementFormDialog } from './cash/MovementForm'
+import { CartTable } from './pos/CartTable'
+import { CustomerPicker } from './pos/CustomerPicker'
+import { PaymentDialog } from './pos/PaymentDialog'
+import { ProductSearch } from './pos/ProductSearch'
+import { Receipt, type CompletedSale } from './pos/Receipt'
 
-const emptyCart: CartItem[] = []
+const lineTotal = (item: CartItem) => Math.round((item.quantity * item.unitPrice - item.discount + item.taxRate) * 100) / 100
 
 export function CashRegisterPage() {
-  const { profile } = useAuth()
-  const canUsePOS = profile?.role?.code === 'cashier' || profile?.role?.code === 'director' || profile?.role?.code === 'administrator'
-  
+  const { profile, can } = useAuth()
+  const canUsePOS = can('pos.sell')
+  // Same rights as the Products page: cashiers cannot create products.
+  const canCreateProduct = can('catalog.manage')
+  // Discounts: directors and administrators until the management sets the rule.
+  const canDiscount = can('pos.discount')
+  const canUseOtherCash = can('cash.other_accounts')
+  const [creatingProduct, setCreatingProduct] = useState<Partial<ProductInput> | null>(null)
+  const [missingBarcode, setMissingBarcode] = useState<string | null>(null)
+
   // Session de caisse
-  const [session, setSession] = useState<any>(null)
+  const [session, setSession] = useState<{ opened_at: string } | null>(null)
   const [sessionLoading, setSessionLoading] = useState(true)
   const [openingAmount, setOpeningAmount] = useState(0)
-  
-  // Panier
-  const [cart, setCart] = useState<CartItem[]>(emptyCart)
+  // When the session cannot be read, the page must not offer to open a register that may already be open.
+  const [sessionError, setSessionError] = useState<string | null>(null)
+  const [offlineUnknown, setOfflineUnknown] = useState(false)
+
+  // Vente en cours
+  const [cart, setCart] = useState<CartItem[]>([])
   const [barcodeInput, setBarcodeInput] = useState('')
-  const [productQuery, setProductQuery] = useState('')
-  const [productMatches, setProductMatches] = useState<Product[]>([])
-  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null)
-  const [customerQuery, setCustomerQuery] = useState('')
-  const [customerMatches, setCustomerMatches] = useState<Customer[]>([])
-  const [cartNotes, setCartNotes] = useState('')
-  
-  // Paiement
-  const [showPayment, setShowPayment] = useState(false)
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash')
-  const [paymentAmount, setPaymentAmount] = useState(0)
-  const [paymentReference, setPaymentReference] = useState('')
-  
-  // États
+  const [customer, setCustomer] = useState<Customer | null>(null)
+  const [requireCustomer, setRequireCustomer] = useState(false)
+  const [paying, setPaying] = useState(false)
+  const [paymentFailure, setPaymentFailure] = useState<string | null>(null)
+  const [outflow, setOutflow] = useState(false)
+  const [accounts, setAccounts] = useState<Account[] | null>(null)
+  // Proforma being cashed (from Proformas › « Encaisser à la caisse »).
+  const location = useLocation()
+  const navigate = useNavigate()
+  const [fromProforma, setFromProforma] = useState<{ id: string; number: string } | null>(null)
+  // Quantities sold on this device and not yet on the server.
+  const [pendingQty, setPendingQty] = useState<Map<string, number>>(new Map())
+
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
-  const [changeDue, setChangeDue] = useState<number | null>(null)
-  const [completedSale, setCompletedSale] = useState<{ saleNumber: string; items: CartItem[]; total: number; paid: number; change: number; customer: string | null; method: PaymentMethod; soldAt: string } | null>(null)
-  
-  // Charger la session de caisse
-  useEffect(() => {
-    void loadSession()
-  }, [])
-  
+  const [completedSale, setCompletedSale] = useState<CompletedSale | null>(null)
+  // Only the ticket is printed (80 mm by default), not the cash register screen.
+  const ticket = useTicketPrinter()
+  const printReceipt = ticket.print
+
+  const refreshPending = useCallback(() => pendingSales().then((sales) => {
+    const map = new Map<string, number>()
+    for (const sale of sales) if (sale.state === 'pending_sync' || sale.state === 'syncing') for (const item of sale.input.items) map.set(item.productId, (map.get(item.productId) ?? 0) + item.quantity)
+    setPendingQty(map)
+  }).catch(() => undefined), [])
+
   const loadSession = async () => {
     setSessionLoading(true)
+    setSessionError(null)
+    setOfflineUnknown(false)
     try {
-      const currentSession = await posService.getCurrentSession()
-      setSession(currentSession)
+      setSession(await posService.getCurrentSession() as { opened_at: string } | null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Erreur de chargement de session')
+      // Offline with nothing saved on this device: the register can still be opened; the
+      // server keeps (and returns) any session already open when the opening is sent.
+      if (isNetworkError(cause)) { setSession(null); setOfflineUnknown(true) }
+      else setSessionError(errorText(cause, 'Erreur de chargement de session'))
     } finally {
       setSessionLoading(false)
     }
   }
-  
-  const openSession = async (e: FormEvent) => {
-    e.preventDefault()
-    setLoading(true)
-    setError(null)
+  useEffect(() => {
+    void loadSession()
+    void refreshPending()
+    void readSettings(['pos.require_customer']).then((values) => setRequireCustomer(values['pos.require_customer'] === true))
+  }, [refreshPending])
+
+  /** Fills the cart from a proforma: current stock, proforma prices kept with a discount per line. */
+  const loadProforma = async (proformaId: string) => {
+    const { data } = await proformaService.list()
+    const proforma = ((data ?? []) as Proforma[]).find((row) => row.id === proformaId)
+    if (!proforma) return say('Proforma introuvable.')
+    const lines: CartItem[] = []
+    const problems: string[] = []
+    for (const item of proforma.items ?? []) {
+      const { data: found } = await productService.getProductById(item.product_id)
+      const product = found as Product | null
+      if (!product) { problems.push(`${item.description} : produit introuvable`); continue }
+      const stock = available(product)
+      const quantity = Number(item.quantity)
+      if (quantity > stock) problems.push(`${item.description} : seulement ${stock} ${product.unit} en stock`)
+      const unitPrice = Number(product.selling_price)
+      const discount = Math.max(0, Math.round((quantity * unitPrice - Number(item.line_total)) * 100) / 100)
+      if (Number(item.line_total) > quantity * unitPrice + 0.005) problems.push(`${item.description} : prix de la proforma supérieur au prix de vente actuel, vendu au prix actuel`)
+      const line: CartItem = { productId: product.id, barcode: product.barcode, name: product.name, unit: product.unit, quantity: Math.min(quantity, stock), unitPrice, discount: 0, taxRate: 0, lineTotal: 0, available: stock }
+      line.discount = Math.min(discount, line.quantity * unitPrice)
+      if (line.quantity > 0) lines.push({ ...line, lineTotal: lineTotal(line) })
+    }
+    setCart(lines)
+    if (proforma.customer_id && proforma.customer) setCustomer({ id: proforma.customer_id, ...proforma.customer } as unknown as Customer)
+    setFromProforma({ id: proforma.id, number: proforma.proforma_number })
+    if (problems.length) say(`Proforma ${proforma.proforma_number} chargée avec des écarts : ${problems.join(' ; ')}.`)
+    else say(`Proforma ${proforma.proforma_number} chargée : vérifiez puis encaissez.`, true)
+  }
+  useEffect(() => {
+    const proformaId = (location.state as { proformaId?: string } | null)?.proformaId
+    if (!session || !proformaId) return
+    navigate(location.pathname, { replace: true, state: null })
+    void loadProforma(proformaId)
+  }, [session, location.state])
+
+  /** Stock that can still be sold: the server's (or the local copy offline, already reduced) minus sales waiting on this device. */
+  const available = (product: Product) => Math.max(0, Number(product.stock_quantity) - (isOnline() ? pendingQty.get(product.id) ?? 0 : 0))
+  const say = (message: string | null, ok = false) => { if (ok) { setSuccess(message); setError(null) } else { setError(message); setSuccess(null) } }
+
+  const openSession = async (event: FormEvent) => {
+    event.preventDefault()
+    setLoading(true); setError(null)
     try {
       await posService.openSession({ opening_amount: openingAmount })
-      setSuccess('Session de caisse ouverte')
+      say('Session de caisse ouverte', true)
       void loadSession()
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Erreur d\'ouverture')
+      say(errorText(cause, 'Erreur d’ouverture'))
     } finally {
       setLoading(false)
     }
   }
-  
+
   const closeSession = async () => {
     if (!confirm('Fermer la session de caisse ?')) return
     const closingAmount = prompt('Montant en caisse :', '0')
     if (!closingAmount) return
-    
     setLoading(true)
     try {
       await posService.closeSession(Number(closingAmount))
-      setSuccess('Session de caisse fermée')
+      say('Session de caisse fermée', true)
       setSession(null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Erreur de fermeture')
+      say(errorText(cause, 'Erreur de fermeture'))
     } finally {
       setLoading(false)
     }
   }
-  
-  // Recherche produit par barcode
-  const handleBarcodeSubmit = async (e: FormEvent) => {
-    e.preventDefault()
-    if (!barcodeInput.trim()) return
-    
+
+  const addToCart = (product: Product) => {
+    const stock = available(product)
+    const index = cart.findIndex((item) => item.productId === product.id)
+    const quantity = (index >= 0 ? cart[index].quantity : 0) + 1
+    if (quantity > stock) return say(stock <= 0 ? `Stock insuffisant : « ${product.name} » est en rupture de stock.` : `Stock insuffisant : seulement ${stock} ${product.unit} disponible(s) pour « ${product.name} ».`)
+    setError(null)
+    if (index >= 0) return setCart(cart.map((item, i) => i === index ? { ...item, quantity, available: stock, lineTotal: lineTotal({ ...item, quantity }) } : item))
+    const item: CartItem = { productId: product.id, barcode: product.barcode, name: product.name, unit: product.unit, quantity: 1, unitPrice: Number(product.selling_price), discount: 0, taxRate: 0, lineTotal: 0, available: stock }
+    setCart([...cart, { ...item, lineTotal: lineTotal(item) }])
+  }
+
+  const setQuantity = (index: number, quantity: number) => {
+    const item = cart[index]
+    if (!Number.isFinite(quantity) || quantity <= 0) return
+    if (item.available !== undefined && quantity > item.available) return say(`Stock insuffisant : seulement ${item.available} ${item.unit} disponible(s) pour « ${item.name} ».`)
+    setError(null)
+    setCart(cart.map((line, i) => i === index ? { ...line, quantity, discount: Math.min(line.discount, quantity * line.unitPrice), lineTotal: lineTotal({ ...line, quantity, discount: Math.min(line.discount, quantity * line.unitPrice) }) } : line))
+  }
+  const setDiscount = (index: number, discount: number) => setCart(cart.map((line, i) => {
+    if (i !== index) return line
+    const value = Math.min(Math.max(0, Number.isFinite(discount) ? discount : 0), line.quantity * line.unitPrice)
+    return { ...line, discount: value, lineTotal: lineTotal({ ...line, discount: value }) }
+  }))
+
+  const handleBarcodeSubmit = async (event: FormEvent) => {
+    event.preventDefault()
+    const code = barcodeInput.trim()
+    if (!code) return
     setLoading(true)
     try {
-      const { data: product } = await productService.findByBarcode(barcodeInput.trim())
+      const { data: product } = await productService.findByBarcode(code)
       if (product) {
         addToCart(product as Product)
         setBarcodeInput('')
+        setMissingBarcode(null)
       } else {
-        setError('Produit non trouvé')
+        say(`Aucun produit actif avec le code-barres ${code}.`)
+        if (canCreateProduct) setMissingBarcode(code)
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Erreur de recherche')
+      say(errorText(cause, 'Erreur de recherche'))
     } finally {
       setLoading(false)
     }
   }
 
-  const searchProducts = async (e: FormEvent) => {
-    e.preventDefault()
-    if (!productQuery.trim()) return setProductMatches([])
-    setLoading(true); setError(null)
-    try {
-      const { data, error: requestError } = await productService.getProducts(0, { search: productQuery.trim(), status: 'active' })
-      if (requestError) throw requestError
-      setProductMatches((data ?? []) as Product[])
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Recherche impossible')
-    } finally { setLoading(false) }
-  }
-
-  const searchCustomers = async (e: FormEvent) => {
-    e.preventDefault()
-    setLoading(true); setError(null)
-    try {
-      const { data, error: requestError } = await customerService.searchCustomers(customerQuery)
-      if (requestError) throw requestError
-      setCustomerMatches((data ?? []) as Customer[])
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Recherche client impossible')
-    } finally { setLoading(false) }
-  }
-  
-  const addToCart = (product: Product) => {
-    const existingIndex = cart.findIndex(item => item.productId === product.id)
-    if (existingIndex >= 0) {
-      const updated = [...cart]
-      updated[existingIndex].quantity += 1
-      updated[existingIndex].lineTotal = updated[existingIndex].quantity * updated[existingIndex].unitPrice
-      setCart(updated)
-    } else {
-      const newItem: CartItem = {
-        productId: product.id,
-        barcode: product.barcode,
-        name: product.name,
-        unit: product.unit,
-        quantity: 1,
-        unitPrice: product.selling_price,
-        discount: 0,
-        taxRate: 0,
-        lineTotal: product.selling_price
-      }
-      setCart([...cart, newItem])
-    }
-  }
-  
-  const updateCartItem = (index: number, field: keyof CartItem, value: number) => {
-    const updated = [...cart]
-    updated[index] = { ...updated[index], [field]: value }
-    if (field === 'quantity' || field === 'unitPrice' || field === 'discount') {
-      updated[index].lineTotal = updated[index].quantity * updated[index].unitPrice - updated[index].discount + updated[index].taxRate
-    }
-    setCart(updated)
-  }
-  
-  const removeCartItem = (index: number) => {
-    setCart(cart.filter((_, i) => i !== index))
-  }
-  
   const cartTotals = posService.calculateCartTotals(cart)
-  
-  const processPayment = async (e: FormEvent) => {
-    e.preventDefault()
-    if (cart.length === 0) return setError('Panier vide')
-    if (cart.some((item) => !Number.isFinite(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.unitPrice) || item.unitPrice < 0 || !Number.isFinite(item.discount) || item.discount < 0 || item.discount > item.quantity * item.unitPrice || !Number.isFinite(item.taxRate) || item.taxRate < 0)) {
-      return setError('Vérifiez les quantités, prix et remises du panier')
-    }
+  const startPayment = () => {
+    if (cart.length === 0) return say('Panier vide')
+    if (requireCustomer && !customer) return say('Client obligatoire : recherchez ou créez le client de la vente.')
+    setPaymentFailure(null)
+    setPaying(true)
+  }
 
-    const paid = paymentAmount || cartTotals.totalAmount
-    if (!Number.isFinite(paid) || paid <= 0) return setError('Le montant reçu doit être positif')
-    if (paid + 0.01 < cartTotals.totalAmount) return setError('Le montant reçu est insuffisant')
-    if (paymentMethod !== 'cash' && Math.abs(paid - cartTotals.totalAmount) > 0.01) {
-      return setError('Un paiement autre qu’en espèces doit être égal au total de la vente')
-    }
-    
+  const confirmSale = async (payment: Payment) => {
     setLoading(true)
-    setError(null)
+    setPaymentFailure(null)
     try {
-      const sale = await posService.createSale({
-        customer_id: selectedCustomer?.id ?? null,
-        items: cart,
-        payments: [{ method: paymentMethod, amount: paid, reference: paymentReference || undefined }],
-        notes: cartNotes
-      })
-      const change = Number((sale as { change_amount?: number }).change_amount ?? 0)
+      const sale = await posService.createSale({ customer_id: customer?.id ?? null, items: cart, payments: [payment], notes: fromProforma ? `Proforma ${fromProforma.number}` : '', proformaId: fromProforma?.id })
+      // Queued (offline) sales have no server answer yet: compute the change here.
+      const change = Number((sale as { change_amount?: number }).change_amount ?? (payment.method === 'cash' ? Math.max(0, Math.round((payment.amount - cartTotals.totalAmount) * 100) / 100) : 0))
       setCompletedSale({
         saleNumber: String((sale as { sale_number?: string }).sale_number ?? 'VENTE'),
-        items: [...cart],
-        total: cartTotals.totalAmount,
-        paid,
-        change,
-        customer: selectedCustomer?.full_name ?? null,
-        method: paymentMethod,
-        soldAt: new Date().toISOString(),
+        items: [...cart], subtotal: cartTotals.subtotal, discount: cartTotals.totalDiscount, tax: cartTotals.totalTax, total: cartTotals.totalAmount,
+        paid: payment.amount, change, customer: customer?.full_name ?? null, cashier: profile?.full_name ?? null, method: payment.method, reference: payment.reference ?? null, soldAt: new Date().toISOString(),
       })
-      setSuccess('Vente enregistrée')
-      setCart(emptyCart)
-      setCartNotes('')
-      setSelectedCustomer(null)
-      setCustomerQuery('')
-      setShowPayment(false)
-      setPaymentAmount(0)
-      setPaymentReference('')
-      setChangeDue(change)
-      
-      // Déclencher l'impression automatique du reçu
-      setTimeout(() => {
-        window.print()
-      }, 500)
+      const where = isOnline() ? 'Vente enregistrée.' : 'Vente enregistrée sur cet appareil : elle sera envoyée au serveur au retour de la connexion.'
+      say(change > 0 ? `${where} Monnaie à rendre : ${change.toFixed(2)} HTG.` : where, true)
+      setCart([]); setCustomer(null); setPaying(false); setFromProforma(null)
+      void refreshPending()
+      setTimeout(printReceipt, 500)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Erreur de vente')
+      setPaymentFailure(errorText(cause, 'Vente refusée'))
     } finally {
       setLoading(false)
     }
   }
-  
-  if (!canUsePOS) {
-    return (
-      <div className="rounded-lg bg-red-50 p-6 text-red-800">
-        <h2 className="text-lg font-semibold">Accès refusé</h2>
-        <p className="mt-2">Seuls les caissiers et directeurs peuvent accéder à la caisse.</p>
-      </div>
-    )
+
+  const openOutflow = async () => {
+    if (!accounts) {
+      const { data, error: loadError } = await ledgerService.listAccounts()
+      if (loadError) return say(errorText(loadError, 'Comptes indisponibles'))
+      setAccounts((data ?? []).filter((account) => account.is_active))
+    }
+    setOutflow(true)
   }
-  
+
+  if (!canUsePOS) {
+    return <div className="rounded-lg bg-red-50 p-6 text-red-800">
+      <h2 className="text-lg font-semibold">Accès refusé</h2>
+      <p className="mt-2">Seuls les caissiers et directeurs peuvent accéder à la caisse.</p>
+    </div>
+  }
+
   if (sessionLoading) {
     return <div role="status" aria-label="Chargement de la session"><Skeleton className="h-3 w-40" /><Skeleton className="mt-3 h-8 w-56" /><div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]"><TableSkeleton rows={5} cols={5} className="" /><CardsSkeleton count={2} className="grid gap-4" /></div></div>
   }
-  
-  if (!session) {
-    return (
-      <div className="max-w-md">
-        <PageHeader title="Caisse" description="Ouvrez votre session de caisse pour commencer" />
-        <form onSubmit={openSession} className="mt-6 rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-          <div>
-            <label className="block text-sm font-medium text-slate-700">Montant d'ouverture (HTG)</label>
-            <input
-              type="number"
-              step="0.01"
-              value={openingAmount}
-              onChange={(e) => setOpeningAmount(Number(e.target.value))}
-              className="mt-1 w-full rounded border p-2"
-              required
-            />
-          </div>
-          <button type="submit" disabled={loading} className="inline-flex items-center gap-1.5 mt-4 rounded-lg bg-brand-700 px-4 py-2 text-white disabled:opacity-50">
-            <LockOpen className="h-4 w-4" aria-hidden="true" />{loading ? 'Ouverture...' : 'Ouvrir la caisse'}
-          </button>
-        </form>
-      </div>
-    )
-  }
-  
-  return (
-    <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_21rem]">
-      <div>
-        <PageHeader title="Caisse" description={`Session ouverte le ${new Date(session.opened_at).toLocaleString()}`} />
-        
-        {error && <div className="mt-4 rounded bg-red-50 p-3 text-red-800">{error}</div>}
-        {success && <div className="mt-4 rounded bg-emerald-50 p-3 text-emerald-800">{success}</div>}
-        
-        {/* Scan barcode */}
-        <form onSubmit={handleBarcodeSubmit} className="ui-card mt-6 flex gap-2 p-3">
-          <input
-            type="text"
-            value={barcodeInput}
-            onChange={(e) => setBarcodeInput(e.target.value)}
-            placeholder="Scanner un code-barres..."
-            className="flex-1"
-            autoFocus
-          />
-          <button type="submit" disabled={loading} className="ui-button-primary px-5">
-            <Plus className="h-4 w-4" aria-hidden="true" />Ajouter
-          </button>
-        </form>
-        <div className="ui-card mt-4 p-3">
-          {selectedCustomer ? <div className="flex items-center justify-between gap-3"><span className="text-sm"><strong>{selectedCustomer.full_name}</strong><span className="ml-2 text-slate-500">Client sélectionné</span></span><button type="button" onClick={() => setSelectedCustomer(null)} className="inline-flex items-center gap-1.5 text-sm text-red-700"><X className="h-4 w-4" aria-hidden="true" />Retirer</button></div> : <form onSubmit={searchCustomers} className="flex gap-2"><input value={customerQuery} onChange={(event) => setCustomerQuery(event.target.value)} placeholder="Rechercher un client (optionnel)" className="min-w-0 flex-1" /><button disabled={loading} className="ui-button-secondary px-4"><Search className="h-4 w-4" aria-hidden="true" />Client</button></form>}
-          {!selectedCustomer && customerMatches.length > 0 && <div className="mt-2 divide-y rounded border">{customerMatches.map((customer) => <button key={customer.id} type="button" onClick={() => { setSelectedCustomer(customer); setCustomerMatches([]) }} className="block w-full px-3 py-2 text-left text-sm hover:bg-slate-50"><strong>{customer.full_name}</strong>{customer.phone && <span className="ml-2 text-slate-500">{customer.phone}</span>}</button>)}</div>}
-        </div>
-        
-        {/* Panier */}
-        <div className="ui-card mt-6 overflow-x-auto">
-          <table className="ui-table min-w-[38rem]">
-            <thead className="bg-slate-50">
-              <tr>
-                <th className="p-3">Produit</th>
-                <th className="p-3">Qté</th>
-                <th className="p-3">Prix unit.</th>
-                <th className="p-3">Total</th>
-                <th className="p-3"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {cart.length === 0 ? (
-                <tr><td colSpan={5} className="ui-empty">Ajoutez un produit par code-barres ou par recherche.</td></tr>
-              ) : cart.map((item, index) => (
-                <tr key={index} className="border-t">
-                  <td className="p-3">
-                    <div className="font-medium">{item.name}</div>
-                    <div className="text-xs text-slate-500">{item.barcode}</div>
-                  </td>
-                  <td className="p-3">
-                    <input
-                      type="number"
-                      min="1"
-                      value={item.quantity}
-                      onChange={(e) => updateCartItem(index, 'quantity', Number(e.target.value))}
-                      className="w-16 rounded border p-1 text-center"
-                    />
-                  </td>
-                  <td className="p-3 font-medium text-slate-700">{item.unitPrice.toFixed(2)} HTG</td>
-                  <td className="p-3 font-medium">{item.lineTotal.toFixed(2)} HTG</td>
-                  <td className="p-3">
-                    <button onClick={() => removeCartItem(index)} aria-label={`Retirer ${item.name}`} className="inline-flex items-center text-red-600 hover:text-red-800"><Trash2 className="h-4 w-4" aria-hidden="true" /></button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        
-        {/* Totaux */}
-        <div className="ui-card mt-4 p-5">
-          <div className="flex justify-between">
-            <span>Sous-total</span>
-            <span>{cartTotals.subtotal.toFixed(2)} HTG</span>
-          </div>
-          {cartTotals.totalDiscount > 0 && (
-            <div className="flex justify-between text-emerald-600">
-              <span>Remise</span>
-              <span>-{cartTotals.totalDiscount.toFixed(2)} HTG</span>
-            </div>
-          )}
-          <div className="mt-2 flex justify-between text-lg font-bold">
-            <span>Total</span>
-            <span>{cartTotals.totalAmount.toFixed(2)} HTG</span>
-          </div>
-        </div>
-        
-        {/* Actions */}
-        <div className="mt-4 flex gap-3">
-          {changeDue !== null && changeDue > 0 && <p className="rounded-lg bg-amber-50 px-4 py-3 text-amber-900">Monnaie à rendre : <strong>{changeDue.toFixed(2)} HTG</strong></p>}
-          <button
-            onClick={() => setShowPayment(true)}
-            disabled={cart.length === 0 || loading}
-            className="ui-button-primary flex-1 py-3"
-          >
-            <Banknote className="h-4 w-4" aria-hidden="true" />Encaisser ({cartTotals.totalAmount.toFixed(2)} HTG)
-          </button>
-          <button
-            onClick={closeSession}
-            className="inline-flex items-center gap-1.5 rounded-lg border px-6 py-3"
-          >
-            <Lock className="h-4 w-4" aria-hidden="true" />Fermer la caisse
-          </button>
-          {completedSale && (
-        <div className="flex gap-3">
-          <button type="button" onClick={() => window.print()} className="inline-flex items-center gap-1.5 rounded-lg border px-4 py-3"><Printer className="h-4 w-4" aria-hidden="true" />Réimprimer le reçu</button>
-          <button type="button" onClick={() => setCompletedSale(null)} className="inline-flex items-center gap-1.5 rounded-lg border px-4 py-3"><Plus className="h-4 w-4" aria-hidden="true" />Nouvelle vente</button>
-        </div>
-      )}
-        </div>
-      </div>
-      <aside className="ui-card h-fit p-5 xl:sticky xl:top-6">
-        <h2 className="text-base font-bold text-slate-950">Recherche produit</h2>
-        <p className="mt-1 text-sm leading-5 text-slate-600">Trouvez un article si le code-barres n’est pas disponible.</p>
-        <form onSubmit={searchProducts} className="mt-4 space-y-2"><input value={productQuery} onChange={(event) => setProductQuery(event.target.value)} placeholder="Nom, référence ou marque" className="w-full" /><button disabled={loading} className="ui-button-secondary w-full"><Search className="h-4 w-4" aria-hidden="true" />Rechercher</button></form>
-        {productMatches.length > 0 && <div className="mt-4 divide-y divide-slate-100 rounded-lg border border-slate-200">{productMatches.map((product) => <button key={product.id} type="button" onClick={() => { addToCart(product); setProductMatches([]); setProductQuery('') }} className="flex w-full items-center justify-between gap-3 px-3 py-3 text-left hover:bg-slate-50"><span><strong className="block text-sm text-slate-900">{product.name}</strong><small className="text-xs text-slate-500">{product.stock_quantity} {product.unit} disponible(s)</small></span><strong className="text-sm text-brand-700">{Number(product.selling_price).toFixed(2)} HTG</strong></button>)}</div>}
-        {productQuery && productMatches.length === 0 && !loading && <p className="mt-4 text-sm text-slate-500">Aucun produit correspondant.</p>}
-      </aside>
-      
-      {/* Modal paiement */}
-      {showPayment && (
-        <div role="dialog" aria-modal="true" aria-label="Encaissement" className="fixed inset-0 z-40 flex items-end justify-center bg-slate-950/45 p-4 sm:items-center">
-          <form onSubmit={processPayment} className="w-full max-w-md rounded-xl bg-white p-6 shadow-lg">
-            <h2 className="text-lg font-semibold">Encaissement</h2>
-            <p className="mt-2 text-2xl font-bold">{cartTotals.totalAmount.toFixed(2)} HTG</p>
-            
-            <div className="mt-4">
-              <label className="block text-sm font-medium">Mode de paiement</label>
-              <select
-                value={paymentMethod}
-                onChange={(e) => setPaymentMethod(e.target.value as PaymentMethod)}
-                className="mt-1 w-full rounded border p-2"
-              >
-                <option value="cash">Espèces</option>
-                <option value="card">Carte</option>
-                <option value="moncash">MonCash (saisie manuelle)</option>
-                <option value="natcash">NatCash (saisie manuelle)</option>
-                <option value="bank_transfer">Virement</option>
-                <option value="check">Chèque</option>
-              </select>
-            </div>
-            
-            <div className="mt-4">
-              <label className="block text-sm font-medium">Montant reçu</label>
-              <input
-                type="number"
-                step="0.01"
-                value={paymentAmount || cartTotals.totalAmount}
-                onChange={(e) => setPaymentAmount(Number(e.target.value))}
-                className="mt-1 w-full rounded border p-2"
-              />
-            </div>
-            
-            {paymentMethod !== 'cash' && (
-              <div className="mt-4">
-                <label className="block text-sm font-medium">Référence de transaction (si disponible)</label>
-                <input
-                  type="text"
-                  value={paymentReference}
-                  onChange={(e) => setPaymentReference(e.target.value)}
-                  className="mt-1 w-full rounded border p-2"
-                />
-              </div>
-            )}
-            {paymentMethod === 'cash' && paymentAmount > cartTotals.totalAmount && (
-              <p className="mt-3 rounded bg-amber-50 p-2 text-sm text-amber-900">Monnaie à rendre : {(paymentAmount - cartTotals.totalAmount).toFixed(2)} HTG</p>
-            )}
-            
-            <div className="mt-6 flex gap-3">
-              <button
-                type="submit"
-                disabled={loading}
-                className="inline-flex items-center gap-1.5 flex-1 rounded-lg bg-brand-700 px-4 py-2 text-white disabled:opacity-50"
-              >
-                <Check className="h-4 w-4" aria-hidden="true" />{loading ? 'Traitement...' : 'Confirmer'}
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowPayment(false)}
-                className="inline-flex items-center gap-1.5 rounded-lg border px-4 py-2"
-              >
-                <X className="h-4 w-4" aria-hidden="true" />Annuler
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-      {completedSale && <section className="print-only mx-auto hidden max-w-sm bg-white p-6 text-slate-950">
-        <div className="text-center">
-          <h1 className="text-xl font-bold">Makèt Peyizan</h1>
-          <p className="mt-1 text-sm text-slate-600">Sistèm jesyon komès</p>
-        </div>
-        <div className="my-4 border-y border-slate-300 py-3 text-sm">
-          <p className="font-semibold">Reçu de vente</p>
-          <p className="mt-1">N°: {completedSale.saleNumber}</p>
-          <p>Date: {new Date(completedSale.soldAt).toLocaleString('fr-FR')}</p>
-          {completedSale.customer && <p>Client: {completedSale.customer}</p>}
-        </div>
-        <div className="space-y-2 text-sm">
-          <p className="font-semibold border-b border-slate-200 pb-1">Articles</p>
-          {completedSale.items.map((item) => (
-            <div key={item.productId} className="flex justify-between gap-3">
-              <span>{item.quantity} × {item.name}</span>
-              <strong>{item.lineTotal.toFixed(2)} HTG</strong>
-            </div>
-          ))}
-        </div>
-        <div className="mt-4 border-t border-slate-300 pt-3 text-sm">
-          <div className="flex justify-between text-base font-bold">
-            <span>Total</span>
-            <span>{completedSale.total.toFixed(2)} HTG</span>
-          </div>
-          <div className="mt-1 flex justify-between">
-            <span>Payé ({completedSale.method})</span>
-            <span>{completedSale.paid.toFixed(2)} HTG</span>
-          </div>
-          {completedSale.change > 0 && (
-            <div className="mt-1 flex justify-between font-semibold">
-              <span>Monnaie rendue</span>
-              <span>{completedSale.change.toFixed(2)} HTG</span>
-            </div>
-          )}
-        </div>
-        <p className="mt-6 text-center text-xs text-slate-600">Merci pour votre visite.</p>
-        <p className="mt-2 text-center text-xs text-slate-500">{new Date().toLocaleString('fr-FR')}</p>
-      </section>}
+
+  if (sessionError) {
+    return <div className="max-w-md">
+      <PageHeader title="Caisse" description="Votre session de caisse n’a pas pu être vérifiée." />
+      <p role="alert" className="ui-alert-error">{sessionError}</p>
+      <button type="button" onClick={() => void loadSession()} className="ui-button-secondary mt-4"><RotateCcw className="h-4 w-4" aria-hidden="true" />Réessayer</button>
     </div>
-  )
+  }
+
+  if (!session) {
+    return <div className="max-w-md">
+      <PageHeader title="Caisse" description="Ouvrez votre session de caisse pour commencer" />
+      {error && <p role="alert" className="ui-alert-error">{error}</p>}
+      {offlineUnknown && <p className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">Hors ligne : votre session n’a pas pu être vérifiée. Si une session est déjà ouverte sur le serveur, c’est elle qui sera utilisée au retour de la connexion.</p>}
+      <form onSubmit={openSession} className="mt-6 rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
+        <label className="block text-sm font-medium text-slate-700">Montant d’ouverture (HTG)
+          <input type="number" step="0.01" min="0" value={openingAmount} onChange={(event) => setOpeningAmount(Number(event.target.value))} className="mt-1 w-full rounded border p-2" required />
+        </label>
+        <button type="submit" disabled={loading} className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-brand-700 px-4 py-2 text-white disabled:opacity-50">
+          <LockOpen className="h-4 w-4" aria-hidden="true" />{loading ? 'Ouverture...' : 'Ouvrir la caisse'}
+        </button>
+      </form>
+    </div>
+  }
+
+  return <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_21rem]">
+    <div>
+      <PageHeader title="Caisse" description={`Session ouverte le ${new Date(session.opened_at).toLocaleString('fr-HT')}`} />
+      {fromProforma && <p className="mt-4 flex items-center justify-between gap-3 rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-sm text-brand-900"><span>Encaissement de la proforma <strong>{fromProforma.number}</strong> : elle sera marquée « transformée en vente ».</span><button type="button" onClick={() => { setFromProforma(null); setCart([]); setCustomer(null) }} className="font-semibold hover:underline">Abandonner</button></p>}
+      {error && <div role="alert" className="mt-4 rounded bg-red-50 p-3 text-red-800">{error}</div>}
+      {success && <div role="status" className="mt-4 rounded bg-emerald-50 p-3 text-emerald-800">{success}</div>}
+
+      <form onSubmit={handleBarcodeSubmit} className="ui-card mt-6 flex gap-2 p-3">
+        <input type="text" value={barcodeInput} onChange={(event) => setBarcodeInput(event.target.value)} placeholder="Scanner un code-barres..." className="flex-1" autoFocus />
+        <button type="submit" disabled={loading} className="ui-button-primary px-5"><Plus className="h-4 w-4" aria-hidden="true" />Ajouter</button>
+      </form>
+      <CustomerPicker customer={customer} onChange={setCustomer} required={requireCustomer} />
+      <CartTable items={cart} canDiscount={canDiscount} onQuantity={setQuantity} onDiscount={setDiscount} onRemove={(index) => setCart(cart.filter((_, i) => i !== index))} />
+
+      <div className="ui-card mt-4 space-y-1 p-5 text-sm">
+        <div className="flex justify-between"><span>Sous-total</span><span className="tabular-nums">{cartTotals.subtotal.toFixed(2)} HTG</span></div>
+        <div className={`flex justify-between ${cartTotals.totalDiscount > 0 ? 'text-emerald-700' : 'text-slate-500'}`}><span>Remises</span><span className="tabular-nums">− {cartTotals.totalDiscount.toFixed(2)} HTG</span></div>
+        <div className="flex justify-between text-slate-500"><span>Taxes</span><span className="tabular-nums">{cartTotals.totalTax.toFixed(2)} HTG</span></div>
+        <div className="flex justify-between pt-1 text-lg font-bold"><span>Total</span><span className="tabular-nums">{cartTotals.totalAmount.toFixed(2)} HTG</span></div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-3">
+        <button type="button" onClick={startPayment} disabled={cart.length === 0 || loading} className="ui-button-primary min-w-56 flex-1 py-3"><Banknote className="h-4 w-4" aria-hidden="true" />Encaisser ({cartTotals.totalAmount.toFixed(2)} HTG)</button>
+        <button type="button" onClick={() => void openOutflow()} className="inline-flex items-center gap-1.5 rounded-lg border px-4 py-3"><ArrowUpRight className="h-4 w-4 text-red-700" aria-hidden="true" />Sortie de caisse</button>
+        <button type="button" onClick={() => void closeSession()} className="inline-flex items-center gap-1.5 rounded-lg border px-4 py-3"><Lock className="h-4 w-4" aria-hidden="true" />Fermer la caisse</button>
+        {completedSale && <button type="button" onClick={printReceipt} className="inline-flex items-center gap-1.5 rounded-lg border px-4 py-3"><Printer className="h-4 w-4" aria-hidden="true" />Réimprimer le reçu</button>}
+      </div>
+    </div>
+
+    <ProductSearch available={available} onPick={addToCart} canCreate={canCreateProduct} missingBarcode={missingBarcode} onCreate={setCreatingProduct} />
+
+    {creatingProduct && <ProductFormDialog quick initial={creatingProduct} onClose={() => setCreatingProduct(null)} onSaved={(product, message) => {
+      setCreatingProduct(null); setMissingBarcode(null); setBarcodeInput('')
+      if (product.active && Number(product.stock_quantity) > 0) { addToCart(product); say(`${message} Ajouté au panier.`, true) }
+      else say(`${message} Il sera vendable après une entrée de stock.`, true)
+    }} />}
+    {paying && <PaymentDialog items={cart} totals={cartTotals} customer={customer?.full_name ?? null} saving={loading} failure={paymentFailure} onConfirm={(payment) => void confirmSale(payment)} onClose={() => setPaying(false)} />}
+    {outflow && accounts && <MovementFormDialog outOnly preset={{ cashAccount: '101000', type: 'expense' }} accounts={accounts} canUsePettyCash={canUseOtherCash} onClose={() => setOutflow(false)} onSaved={(message) => { setOutflow(false); say(message, true) }} />}
+    {completedSale && <Receipt sale={completedSale} company={ticket.company} sectionRef={ticket.ref} />}
+  </div>
 }

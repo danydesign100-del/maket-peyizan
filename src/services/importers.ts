@@ -2,8 +2,9 @@ import type { Importer, ImportRow } from '../components/ImportDialog'
 import { normalizeHeader } from '../lib/spreadsheet'
 import { getSnapshot, refreshSnapshots, type SnapshotName } from '../lib/offline/snapshot'
 import { isOnline } from '../lib/offline/status'
-import type { Category, Customer, Product } from '../types/catalog'
+import type { CatalogListItem, Category, Customer, Product } from '../types/catalog'
 import type { Supplier } from '../types/stock'
+import { catalogListService } from './catalogListService'
 import { categoryService } from './categoryService'
 import { customerService } from './customerService'
 import { expenseService } from './expenseService'
@@ -34,7 +35,7 @@ async function reference<T>(name: SnapshotName): Promise<T[]> {
 /** Marks `id` as used in this file; returns true when it already was. */
 const seenBefore = (seen: Set<string>, id: string) => { if (seen.has(id)) return true; seen.add(id); return false }
 
-type ProductCtx = { categories: Map<string, string>; suppliers: Map<string, string>; barcodes: Set<string>; names: Set<string> }
+type ProductCtx = { categories: Map<string, string>; suppliers: Map<string, string>; units: Map<string, string>; barcodes: Set<string>; names: Set<string> }
 
 export const productImporter: Importer<ProductCtx> = {
   title: 'Importer des produits',
@@ -56,9 +57,10 @@ export const productImporter: Importer<ProductCtx> = {
     { key: 'description', label: 'Description', aliases: ['details', 'detail', 'notes'], example: '' },
   ],
   prepare: async () => {
-    const [products, categories, suppliers] = await Promise.all([reference<Product>('products'), reference<Category>('categories'), reference<Supplier>('suppliers')])
+    const [products, categories, suppliers, units] = await Promise.all([reference<Product>('products'), reference<Category>('categories'), reference<Supplier>('suppliers'), catalogListService.list('units')])
     return {
       categories: new Map(categories.map((category) => [key(category.name), category.id])),
+      units: new Map((units.data ?? []).filter((unit) => unit.active).map((unit) => [key(unit.name), unit.name])),
       suppliers: new Map(suppliers.map((supplier) => [key(supplier.name), supplier.id])),
       barcodes: new Set(products.map((product) => product.barcode?.trim()).filter((code): code is string => Boolean(code))),
       names: new Set(products.map((product) => key(product.name))),
@@ -67,7 +69,7 @@ export const productImporter: Importer<ProductCtx> = {
   check: (row, ctx, seen) => {
     const barcode = text(row, 'barcode')
     if (barcode && (ctx.barcodes.has(barcode) || seenBefore(seen, `barcode:${barcode}`))) return `Code-barres ${barcode} déjà utilisé`
-    if (!barcode && (ctx.names.has(key(row.name)) || seenBefore(seen, `name:${key(row.name)}`))) return 'Produit déjà existant'
+    if (ctx.names.has(key(row.name)) || seenBefore(seen, `name:${key(row.name)}`)) return 'Produit déjà existant (même nom)'
     return null
   },
   save: async (row, ctx) => {
@@ -80,8 +82,15 @@ export const productImporter: Importer<ProductCtx> = {
     const supplierName = text(row, 'supplier')
     let supplierId = supplierName ? ctx.suppliers.get(key(supplierName)) ?? null : null
     if (supplierName && !supplierId) {
-      supplierId = ensure<Supplier>(await supplierService.createSupplier({ name: supplierName, company_name: null, phone: null, email: null, address: null, tax_id: null, notes: null })).id
+      supplierId = ensure<Supplier>(await supplierService.createSupplier({ name: supplierName, category_id: null, company_name: null, phone: null, email: null, address: null, tax_id: null, notes: null })).id
       ctx.suppliers.set(key(supplierName), supplierId)
+    }
+    // Units missing from the list are added, so that a file never fails on « sac 50 lb ».
+    const unitName = text(row, 'unit')?.trim().replace(/\s+/g, ' ') || 'unité'
+    let unit = ctx.units.get(key(unitName))
+    if (!unit) {
+      unit = ensure<CatalogListItem>(await catalogListService.create('units', unitName)).name
+      ctx.units.set(key(unitName), unit)
     }
     const sellingPrice = num(row, 'selling_price') ?? 0
     const purchasePrice = num(row, 'purchase_price') ?? 0
@@ -89,14 +98,14 @@ export const productImporter: Importer<ProductCtx> = {
       name: text(row, 'name')!, barcode: text(row, 'barcode'), brand: text(row, 'brand'), description: text(row, 'description'),
       category_id: categoryId, supplier_id: supplierId,
       purchase_price: purchasePrice, selling_price: sellingPrice, proforma_price: num(row, 'proforma_price') ?? sellingPrice,
-      stock_quantity: 0, minimum_stock: num(row, 'minimum_stock') ?? 0, unit: text(row, 'unit') ?? 'unité',
+      stock_quantity: 0, minimum_stock: num(row, 'minimum_stock') ?? 0, unit,
       expiration_date: text(row, 'expiration_date'), active: true,
     }))
     if (text(row, 'barcode')) ctx.barcodes.add(text(row, 'barcode')!)
     ctx.names.add(key(row.name))
     // Initial stock goes through a stock movement, exactly like the product form.
     const initialStock = num(row, 'stock_quantity') ?? 0
-    if (initialStock > 0) ensure(await stockService.createMovement({ product_id: product.id, movement_type: 'entry', quantity: initialStock, reason: 'Stock initial (import)', purchase_price: purchasePrice }))
+    if (initialStock > 0) ensure(await stockService.createMovement({ product_id: product.id, movement_type: 'entry', quantity: initialStock, reason: 'Stock initial (import)', purchase_price: purchasePrice, settlement: 'opening' }))
   },
 }
 
@@ -140,24 +149,35 @@ export const customerImporter: Importer<CustomerCtx> = {
 }
 
 type NameCtx = { names: Set<string> }
+type SupplierCtx = NameCtx & { categories: Map<string, string> }
 
-export const supplierImporter: Importer<NameCtx> = {
+export const supplierImporter: Importer<SupplierCtx> = {
   title: 'Importer des fournisseurs',
   entity: 'fournisseurs',
   templateName: 'modele-import-fournisseurs.xlsx',
   fields: [
     { key: 'name', label: 'Nom', required: true, aliases: ['fournisseur', 'supplier', 'name', 'nom du fournisseur', 'founise'], example: 'Distribution Nord' },
     { key: 'company_name', label: 'Entreprise', aliases: ['societe', 'company', 'raison sociale'], example: 'Distribution Nord SA' },
+    { key: 'category', label: 'Catégorie', aliases: ['categorie', 'category', 'type', 'type de fournisseur', 'kategori'], example: 'Grossistes' },
     { key: 'phone', label: 'Téléphone', aliases: ['tel', 'telephone', 'phone', 'mobile', 'telefon'], example: '+509 2810 0000' },
     { key: 'email', label: 'E-mail', type: 'email', aliases: ['email', 'courriel', 'mail'], example: 'contact@example.com' },
     { key: 'address', label: 'Adresse', aliases: ['address', 'adres', 'ville'], example: 'Cap-Haïtien' },
     { key: 'tax_id', label: 'NIF', aliases: ['nif', 'tax id', 'numero fiscal'], example: '' },
     { key: 'notes', label: 'Notes', aliases: ['remarques', 'commentaire', 'note'], example: '' },
   ],
-  prepare: async () => ({ names: new Set((await reference<Supplier>('suppliers')).map((supplier) => key(supplier.name))) }),
+  prepare: async () => {
+    const [suppliers, categories] = await Promise.all([reference<Supplier>('suppliers'), catalogListService.list('supplier_categories')])
+    return { names: new Set(suppliers.map((supplier) => key(supplier.name))), categories: new Map((categories.data ?? []).map((category) => [key(category.name), category.id])) }
+  },
   check: (row, ctx, seen) => ctx.names.has(key(row.name)) || seenBefore(seen, key(row.name)) ? 'Fournisseur déjà existant' : null,
   save: async (row, ctx) => {
-    ensure(await supplierService.createSupplier({ name: text(row, 'name')!, company_name: text(row, 'company_name'), phone: text(row, 'phone'), email: text(row, 'email'), address: text(row, 'address'), tax_id: text(row, 'tax_id'), notes: text(row, 'notes') }))
+    const categoryName = text(row, 'category')?.trim()
+    let categoryId = categoryName ? ctx.categories.get(key(categoryName)) ?? null : null
+    if (categoryName && !categoryId) {
+      categoryId = ensure<CatalogListItem>(await catalogListService.create('supplier_categories', categoryName)).id
+      ctx.categories.set(key(categoryName), categoryId)
+    }
+    ensure(await supplierService.createSupplier({ name: text(row, 'name')!, category_id: categoryId, company_name: text(row, 'company_name'), phone: text(row, 'phone'), email: text(row, 'email'), address: text(row, 'address'), tax_id: text(row, 'tax_id'), notes: text(row, 'notes') }))
     ctx.names.add(key(row.name))
   },
 }

@@ -64,3 +64,13 @@ export function parseDate(value: SheetCell): string | null {
   }
   return null
 }
+
+/** Downloads rows as an .xlsx file (first row = headers). */
+export async function downloadSheet(fileName: string, sheetName: string, rows: SheetCell[][]) {
+  const XLSX = await import('xlsx')
+  const sheet = XLSX.utils.aoa_to_sheet(rows)
+  sheet['!cols'] = (rows[0] ?? []).map((_, column) => ({ wch: Math.min(48, Math.max(10, ...rows.map((row) => String(row[column] ?? '').length + 2))) }))
+  const workbook = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(workbook, sheet, sheetName.slice(0, 31))
+  XLSX.writeFile(workbook, fileName)
+}

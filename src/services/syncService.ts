@@ -1,12 +1,17 @@
+import { cachedPermissions, defaultPermissions } from '../lib/permissions'
+import { catalogListService } from './catalogListService'
 import { getSupabaseClient, isSupabaseConfigured } from '../lib/supabase'
-import { pendingSales, updateOfflineSale } from './offlineSales'
+import { deleteOfflineSale, pendingSales, updateOfflineSale } from './offlineSales'
 import { getCacheScope, setCacheScope } from '../lib/offline/cache'
 import { probeConnection, isNetworkError, OfflineError } from '../lib/offline/network'
-import { flushOutbox, getIdMap, listOutbox, remapIds, removeOp } from '../lib/offline/outbox'
+import { flushOutbox, getIdMap, listOutbox, remapIds, removeOp, retryOp, type PushStats } from '../lib/offline/outbox'
+import { errorText } from '../lib/errors'
 import { refreshSnapshots } from '../lib/offline/snapshot'
 import { getSyncStatus, isOnline, markOffline, updateSyncStatus } from '../lib/offline/status'
 import { onOfflineWrite } from '../lib/offline/wrap'
-import { accountingService } from './accountingService'
+import { ledgerService } from './ledgerService'
+import { monthToDate } from '../lib/period'
+import { financialYearStart } from '../lib/statements'
 import { expenseService } from './expenseService'
 import { posService } from './posService'
 import { proformaService } from './proformaService'
@@ -22,7 +27,7 @@ const retryDelay = (attempts: number) => Math.min(60_000, 1_000 * 2 ** Math.min(
 const PULL_INTERVAL = 10 * 60_000
 
 /** Sends queued sales; `before` limits the flush to sales recorded before a given time. */
-export async function syncPendingSales(before?: string) {
+export async function syncPendingSales(before?: string, stats?: PushStats) {
   if (salesRunning || !isSupabaseConfigured || !isOnline()) return
   salesRunning = true
   try {
@@ -38,22 +43,35 @@ export async function syncPendingSales(before?: string) {
           p_client_sale_id: sale.clientSaleId,
           p_customer_id: input.customer_id,
           p_items: input.items.map(({ productId, quantity, discount, taxRate }) => ({ product_id: productId, quantity, discount_amount: discount, tax_amount: taxRate })),
-          // Current central schema groups mobile wallets under mobile_money and
-          // cheques under other; the human-readable method is preserved in the
-          // reference until the central payment enum is expanded.
+          // Methods are sent as entered (moncash, natcash, check). MonCash/NatCash need
+          // their transaction ID; a sale queued before the ID became required gets a
+          // visible placeholder so that it still syncs.
           p_payments: input.payments.map((payment) => ({
-            method: payment.method === 'moncash' || payment.method === 'natcash' ? 'mobile_money' : payment.method === 'check' ? 'other' : payment.method,
+            method: payment.method,
             amount: payment.amount,
-            reference: payment.method === 'moncash' || payment.method === 'natcash' || payment.method === 'check' ? `${payment.method}:${payment.reference ?? ''}` : payment.reference,
+            reference: (payment.method === 'moncash' || payment.method === 'natcash') && !payment.reference?.trim() ? `SANS-ID-${sale.clientSaleId.slice(0, 8)}` : payment.reference,
           })),
           p_notes: input.notes?.trim() || null,
+          // The real time of the sale, not the time it reaches the server.
+          p_sold_at: sale.input.soldAt ?? sale.createdAt,
         })
         if (error || !data) throw error ?? new Error('Synchronisation non confirmée')
-        await updateOfflineSale(sale.id, { state: 'synced', lastError: null })
+        if (input.proformaId) {
+          // The sale is on the server: the proforma it came from is now « transformée en vente ».
+          const { error: linkError } = await getSupabaseClient().rpc('mark_proforma_converted', { p_proforma_id: input.proformaId, p_sale_id: (data as { id: string }).id })
+          // The sale stays recorded; only the proforma's status is left to update by hand.
+          if (linkError && stats) stats.errors.push(`Vente enregistrée, mais la proforma n’a pas été marquée « transformée en vente » : ${errorText(linkError)}`)
+        }
+        await updateOfflineSale(sale.id, { state: 'synced', lastError: null, serverSaleNumber: (data as { sale_number?: string }).sale_number })
+        if (stats) stats.sent += 1
       } catch (cause) {
         const offline = isNetworkError(cause)
-        await updateOfflineSale(sale.id, { state: offline ? 'pending_sync' : 'sync_error', attempts: sale.attempts + 1, lastError: cause instanceof Error ? cause.message.slice(0, 200) : 'Erreur réseau' })
-        if (offline) { markOffline(); break }
+        // The server's real reason (stock, session, MonCash ID…), not « Erreur réseau ».
+        const reason = errorText(cause).slice(0, 200)
+        await updateOfflineSale(sale.id, { state: offline ? 'pending_sync' : 'sync_error', attempts: sale.attempts + 1, lastError: offline ? 'En attente de connexion' : reason })
+        if (!offline && stats && sale.state !== 'sync_error') { stats.failed += 1; stats.errors.push(`Vente du ${new Date(sale.createdAt).toLocaleString('fr-HT')} : ${reason}`) }
+        // A failed send: offline only if the server is unreachable; retried on the next pass.
+        if (offline) { await probeConnection(); break }
       }
     }
   } finally {
@@ -75,13 +93,15 @@ export async function refreshPendingCount() {
 /** Sends local changes in order. A cash register closure first flushes the sales made before it. */
 export async function pushChanges() {
   if (!isOnline()) return
-  const result = await flushOutbox(async (op) => { if (op.op === 'pos.closeSession') await syncPendingSales(op.createdAt) })
-  if (result === 'done') await syncPendingSales()
+  const stats: PushStats = { sent: 0, failed: 0, errors: [] }
+  const result = await flushOutbox(async (op) => { if (op.op === 'pos.closeSession') await syncPendingSales(op.createdAt, stats) }, stats)
+  if (result === 'done') await syncPendingSales(undefined, stats)
   await refreshPendingCount()
+  if (stats.sent || stats.failed) updateSyncStatus({ report: { at: new Date().toISOString(), ...stats } })
   if (result === 'offline') throw new OfflineError('Connexion perdue pendant la synchronisation')
 }
 
-const canReadAccounting = () => ['director', 'administrator', 'accountant'].includes(role)
+const canReadAccounting = () => (cachedPermissions(getCacheScope()) ?? defaultPermissions(role)).includes('accounting.manage')
 
 /** Downloads reference data and the default views of each page for offline use. */
 export async function pullData() {
@@ -92,12 +112,14 @@ export async function pullData() {
     () => posService.getCurrentSession(), () => posService.getSessionSales(), () => posService.getTodaySales(),
     () => salesService.listMine(), () => salesService.listAll(),
     () => proformaService.list(), () => stockMovementService.getMovements(0, {}), () => cashCountService.list(0, ''),
+    () => catalogListService.list('units'), () => catalogListService.list('supplier_categories'),
   ]
   if (canReadAccounting()) warmups.push(
     () => expenseService.getExpenses(0), () => expenseService.getMonthlyTotals(),
-    () => accountingService.getAccounts({ active: true }), () => accountingService.getJournalEntries({ status: 'draft' }),
-    () => accountingService.getTrialBalance(), () => accountingService.getGeneralLedger(), () => accountingService.getBalanceSheet(),
-    () => accountingService.getIncomeStatement(), () => accountingService.getAuditLog({ page: 0 }),
+    // Same arguments as the accounting screens' defaults (this month, this year's balance sheet).
+    () => ledgerService.listAccounts(), () => ledgerService.listPartners(), () => ledgerService.balances(null, null),
+    () => ledgerService.balances(monthToDate().from, monthToDate().to), () => ledgerService.balances(financialYearStart(monthToDate().to), monthToDate().to),
+    () => ledgerService.listEntries({ from: monthToDate().from, to: monthToDate().to, status: '', type: '', search: '', page: 0 }),
   )
   for (const warmup of warmups) {
     if (!isOnline()) break
@@ -115,7 +137,7 @@ export function syncNow(options: { pull?: boolean } = {}) {
       if (options.pull !== false) await pullData()
       updateSyncStatus({ lastSyncAt: new Date().toISOString() })
     } catch (cause) {
-      updateSyncStatus({ lastError: cause instanceof Error ? cause.message : 'Synchronisation impossible' })
+      updateSyncStatus({ lastError: errorText(cause, 'Synchronisation impossible') })
     } finally {
       updateSyncStatus({ syncing: false })
       await refreshPendingCount()
@@ -123,6 +145,24 @@ export function syncNow(options: { pull?: boolean } = {}) {
     }
   })()
   return syncing
+}
+
+/** New attempt for a refused sale, now. */
+export async function retrySale(id: string) {
+  await updateOfflineSale(id, { state: 'pending_sync', attempts: 0, lastError: null })
+  await syncNow({ pull: false })
+}
+
+/** New attempt for a refused operation, now. */
+export async function retryOperation(seq: number) {
+  await retryOp(seq)
+  await syncNow({ pull: false })
+}
+
+/** Abandons a refused sale: it will never be recorded on the server. */
+export async function discardSale(id: string) {
+  await deleteOfflineSale(id)
+  await refreshPendingCount()
 }
 
 export async function discardOperation(seq: number) {
@@ -149,7 +189,12 @@ export function startBackgroundSync() {
   const signedIn = () => getCacheScope() !== 'anon'
   const onOnline = () => { if (signedIn()) void syncNow({ pull: isStale() }) }
   const onOffline = () => markOffline()
-  const onVisible = () => { if (document.visibilityState === 'visible' && signedIn() && (getSyncStatus().pending || isStale())) void syncNow({ pull: isStale() }) }
+  const onVisible = () => {
+    if (document.visibilityState !== 'visible' || !signedIn()) return
+    // Back on the tab or the device woke up: check the connection now rather than at the next tick.
+    if (!isOnline()) void probeConnection().then((online) => { if (online) onOnline() })
+    else if (getSyncStatus().pending || isStale()) void syncNow({ pull: isStale() })
+  }
   const tick = () => {
     if (!signedIn()) return
     if (!isOnline()) void probeConnection().then((online) => { if (online) onOnline() })
@@ -161,7 +206,7 @@ export function startBackgroundSync() {
     clearTimeout(refreshTimer)
     refreshTimer = setTimeout(() => { if (isOnline()) void refreshSnapshots() }, 3000)
   })
-  const interval = setInterval(tick, 30_000)
+  const interval = setInterval(tick, 15_000)
   window.addEventListener('online', onOnline); window.addEventListener('offline', onOffline)
   window.addEventListener('focus', onVisible); document.addEventListener('visibilitychange', onVisible)
   void refreshPendingCount()

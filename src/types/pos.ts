@@ -10,6 +10,8 @@ export type CartItem = {
   discount: number
   taxRate: number
   lineTotal: number
+  /** Stock available when the line was added (server stock minus sales still waiting on this device). */
+  available?: number
 }
 
 export type Cart = {
@@ -25,6 +27,12 @@ export type Cart = {
 
 /** Payments are recorded manually; MonCash/NatCash are not API-verified. */
 export type PaymentMethod = 'cash' | 'card' | 'moncash' | 'natcash' | 'bank_transfer' | 'check'
+
+/** Labels of every method stored in payments (mobile_money and other: sales recorded before MonCash/NatCash were separated). */
+export const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  cash: 'Espèces', card: 'Carte', moncash: 'MonCash', natcash: 'NatCash', mobile_money: 'Monnaie électronique',
+  bank_transfer: 'Virement', check: 'Chèque', other: 'Autre',
+}
 
 export type Payment = {
   method: PaymentMethod
@@ -55,4 +63,8 @@ export type SaleInput = {
   items: Omit<CartItem, 'lineTotal'>[]
   payments: Payment[]
   notes?: string
+  /** Real time of the sale (kept when it is sent later). */
+  soldAt?: string
+  /** Proforma cashed by this sale (marked « transformée en vente » once the sale is on the server). */
+  proformaId?: string
 }

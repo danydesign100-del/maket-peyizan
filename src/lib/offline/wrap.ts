@@ -1,7 +1,7 @@
 import { readCache, writeCache } from './cache'
-import { hasError, hasNetworkError, isNetworkError, OfflineError, withTimeout } from './network'
+import { hasError, hasNetworkError, isNetworkError, OfflineError, probeConnection, withTimeout } from './network'
 import { enqueueOp, registerExecutor } from './outbox'
-import { getSyncStatus, isOnline, markOffline, markOnline, updateSyncStatus } from './status'
+import { getSyncStatus, isOnline, markOnline, updateSyncStatus } from './status'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyFn = (...args: any[]) => Promise<any>
@@ -33,6 +33,7 @@ const notifyWrite = (op: string) => listeners.forEach((listener) => listener(op)
 
 export const OFFLINE_MISS = 'Données non disponibles hors ligne. Synchronisez dès que la connexion revient.'
 export const ONLINE_REQUIRED = 'Cette action nécessite une connexion Internet.'
+export const NO_ANSWER = 'Le serveur n’a pas répondu. Réessayez dans un instant.'
 
 function offlineResult(style: Style, message: string) {
   if (style === 'throw') throw new OfflineError(message)
@@ -53,17 +54,20 @@ export async function cachedRead<R>(key: string, run: () => Promise<R>, options:
     } catch (cause) {
       if (!isNetworkError(cause)) throw cause
     }
-    markOffline()
+    // One failed or slow request is not enough to switch the whole app offline:
+    // the server is asked first (probeConnection marks the state either way).
+    await probeConnection()
   }
+  const offline = !isOnline()
   const local = await options.fallback?.()
   if (local !== undefined) return local as R
   const cached = await readCache<R>(key)
   if (cached) {
     const since = getSyncStatus().cachedSince
-    if (!since || cached.savedAt < since) updateSyncStatus({ cachedSince: cached.savedAt })
+    if (offline && (!since || cached.savedAt < since)) updateSyncStatus({ cachedSince: cached.savedAt })
     return cached.value
   }
-  return offlineResult(style, OFFLINE_MISS) as R
+  return offlineResult(style, offline ? OFFLINE_MISS : NO_ANSWER) as R
 }
 
 /** Adds caching, offline queueing or an explicit online requirement to a service. */
@@ -89,7 +93,8 @@ export function withOffline<T extends Record<string, unknown>>(name: string, ser
         } catch (cause) {
           if (!isNetworkError(cause)) throw cause
         }
-        markOffline()
+        // Queued either way (it syncs on the next pass); offline only if the server is unreachable.
+        await probeConnection()
       }
       const tempId = `local-${crypto.randomUUID()}`
       const label = typeof write.label === 'function' ? write.label(...args) : write.label
@@ -111,8 +116,7 @@ export function withOffline<T extends Record<string, unknown>>(name: string, ser
       } catch (cause) {
         if (!isNetworkError(cause)) throw cause
       }
-      markOffline()
-      return offlineResult(style, ONLINE_REQUIRED)
+      return offlineResult(style, (await probeConnection()) ? NO_ANSWER : ONLINE_REQUIRED)
     }
   }
 

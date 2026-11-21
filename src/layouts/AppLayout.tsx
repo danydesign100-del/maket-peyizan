@@ -1,41 +1,44 @@
 import { NavLink, Outlet } from 'react-router-dom'
-import { ArrowLeftRight, Calculator, CalendarCheck, ChartColumn, Coins, FileText, LayoutDashboard, LogOut, Menu, Package, Receipt, Settings, ShoppingCart, Tags, Truck, UserCog, Users, Wallet, Warehouse, type LucideIcon } from 'lucide-react'
+import { TestVersionBanner } from '../components/TestVersionBanner'
+import { ArrowLeftRight, BanknoteArrowDown, Calculator, CalendarCheck, ChartColumn, Coins, FileText, LayoutDashboard, LogOut, Menu, Package, Receipt, Settings, ShoppingCart, Tags, Truck, UserCog, Users, Wallet, Warehouse, type LucideIcon } from 'lucide-react'
 import { useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
-import { OfflineBanner, SyncButton } from '../components/SyncStatus'
+import { canOpen } from '../lib/permissions'
+import { OfflineBanner, SyncButton, SyncReport } from '../components/SyncStatus'
 import { InstallButton, UpdateBanner } from '../components/InstallApp'
 
-type NavItem = { to: string; label: string; icon: LucideIcon; roles?: string[] }
+type NavItem = { to: string; label: string; icon: LucideIcon }
 const navigation: NavItem[] = [
   { to: '/', label: 'Tableau de bord', icon: LayoutDashboard },
-  { to: '/caisse', label: 'Point de vente', icon: ShoppingCart, roles: ['cashier', 'director', 'administrator'] },
+  { to: '/caisse', label: 'Point de vente', icon: ShoppingCart },
   { to: '/ventes', label: 'Ventes', icon: Receipt },
-  { to: '/recettes-journalieres', label: 'Recettes journalières', icon: CalendarCheck, roles: ['cashier', 'director', 'administrator'] },
-  { to: '/comptage-caisse', label: 'Comptage de caisse', icon: Coins, roles: ['cashier', 'director', 'administrator', 'accountant'] },
-  { to: '/proformas', label: 'Proformas', icon: FileText, roles: ['cashier', 'director', 'administrator'] },
+  { to: '/recettes-journalieres', label: 'Recettes journalières', icon: CalendarCheck },
+  { to: '/comptage-caisse', label: 'Comptage de caisse', icon: Coins },
+  { to: '/caisse/mouvements', label: 'Mouvements de caisse', icon: BanknoteArrowDown },
+  { to: '/proformas', label: 'Proformas', icon: FileText },
   { to: '/produits', label: 'Produits', icon: Package },
-  { to: '/categories', label: 'Catégories', icon: Tags, roles: ['director', 'administrator', 'stock_manager'] },
+  { to: '/categories', label: 'Catégories', icon: Tags },
   { to: '/stock', label: 'Stocks', icon: Warehouse },
-  { to: '/stock/mouvements', label: 'Mouvements', icon: ArrowLeftRight, roles: ['director', 'administrator', 'stock_manager'] },
+  { to: '/stock/mouvements', label: 'Mouvements', icon: ArrowLeftRight },
   { to: '/clients', label: 'Clients', icon: Users },
-  { to: '/fournisseurs', label: 'Fournisseurs', icon: Truck, roles: ['director', 'administrator', 'stock_manager'] },
-  { to: '/depenses', label: 'Dépenses', icon: Wallet, roles: ['director', 'administrator', 'accountant'] },
-  { to: '/rapports', label: 'Rapports', icon: ChartColumn, roles: ['director', 'administrator', 'accountant'] },
-  { to: '/comptabilite', label: 'Comptabilité', icon: Calculator, roles: ['director', 'administrator', 'accountant'] },
-  { to: '/utilisateurs', label: 'Utilisateurs', icon: UserCog, roles: ['director', 'administrator'] },
-  { to: '/parametres', label: 'Paramètres', icon: Settings, roles: ['director', 'administrator'] },
+  { to: '/fournisseurs', label: 'Fournisseurs', icon: Truck },
+  { to: '/depenses', label: 'Dépenses', icon: Wallet },
+  { to: '/rapports', label: 'Rapports', icon: ChartColumn },
+  { to: '/comptabilite', label: 'Comptabilité', icon: Calculator },
+  { to: '/utilisateurs', label: 'Utilisateurs', icon: UserCog },
+  { to: '/parametres', label: 'Paramètres', icon: Settings },
 ]
 
 const roleLabels: Record<string, string> = { director: 'Directeur', administrator: 'Administrateur', accountant: 'Comptable', cashier: 'Caissière', stock_manager: 'Gestionnaire de stock' }
 
 export function AppLayout() {
-  const { profile, signOut } = useAuth()
+  const { profile, signOut, permissions } = useAuth()
   const [open, setOpen] = useState(false)
   const role = profile?.role?.code ?? ''
-  const visibleNavigation = navigation.filter((item) => !item.roles || item.roles.includes(role))
+  const visibleNavigation = navigation.filter((item) => canOpen(item.to, permissions))
   const close = () => setOpen(false)
 
-  return <div className="min-h-screen bg-slate-50 lg:grid lg:grid-cols-[16.5rem_minmax(0,1fr)]">
+  return <div className="min-h-screen bg-slate-50 lg:grid lg:grid-cols-[16.5rem_minmax(0,1fr)] print:block print:min-h-0 print:bg-white">
     <header className="no-print flex h-16 items-center justify-between border-b border-slate-200 bg-white px-4 lg:hidden">
       <NavLink to="/" className="flex items-center gap-2 whitespace-nowrap text-sm font-bold text-brand-950"><span className="grid h-8 w-8 place-items-center rounded-lg bg-accent-500 text-xs">MP</span>Makèt Peyizan</NavLink>
       <div className="flex items-center gap-2"><SyncButton tone="light" /><button aria-expanded={open} aria-label="Ouvrir le menu" onClick={() => setOpen((value) => !value)} className="ui-button-secondary gap-2 px-3 py-2"><Menu className="h-4 w-4" aria-hidden="true" />Menu</button></div>
@@ -48,7 +51,7 @@ export function AppLayout() {
       </NavLink>
       <p className="mt-7 px-3 text-[10px] font-bold uppercase tracking-[0.15em] text-white/45">Navigation</p>
       <nav aria-label="Navigation principale" className="mt-2 flex-1 space-y-1 overflow-y-auto pr-1">
-        {visibleNavigation.map((item) => <NavLink key={item.to} to={item.to} end={item.to === '/'} onClick={close} className={({ isActive }) => `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${isActive ? 'bg-white text-brand-950 font-semibold shadow-sm' : 'text-white/72 hover:bg-white/10 hover:text-white'}`}>
+        {visibleNavigation.map((item) => <NavLink key={item.to} to={item.to} end={item.to === '/' || navigation.some((other) => other.to.startsWith(`${item.to}/`))} onClick={close} className={({ isActive }) => `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${isActive ? 'bg-white text-brand-950 font-semibold shadow-sm' : 'text-white/72 hover:bg-white/10 hover:text-white'}`}>
           <item.icon aria-hidden="true" className="h-[18px] w-[18px] shrink-0" strokeWidth={1.9} />{item.label}
         </NavLink>)}
       </nav>
@@ -58,7 +61,7 @@ export function AppLayout() {
         <button onClick={() => void signOut()} className="mt-3 flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm text-white/65 transition hover:bg-white/10 hover:text-white"><LogOut className="h-[18px] w-[18px]" aria-hidden="true" />Déconnexion</button>
       </div>
     </aside>
-    <main className="min-w-0 px-4 py-6 sm:px-6 lg:px-9 lg:py-8 xl:px-11"><OfflineBanner /><Outlet /></main>
+    <main className="min-w-0 px-4 py-6 sm:px-6 lg:px-9 lg:py-8 xl:px-11 print:p-0"><TestVersionBanner className="mb-4 print:hidden" /><OfflineBanner /><Outlet /><SyncReport /></main>
     <UpdateBanner />
   </div>
 }

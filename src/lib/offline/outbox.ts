@@ -1,6 +1,7 @@
 import { idbRequest } from './idb'
 import { getCacheScope, readCache, writeCache } from './cache'
 import { hasError, hasNetworkError, isNetworkError } from './network'
+import { errorText } from '../errors'
 
 // Persistent queue of writes made while the server was unreachable. Each entry
 // names a registered executor so that it can be replayed after a reload.
@@ -48,10 +49,19 @@ export function remapIds<T>(value: T, map: IdMap): T {
   return value
 }
 
-const errorMessage = (cause: unknown) => (cause instanceof Error ? cause.message : String((cause as { message?: unknown })?.message ?? cause ?? 'Erreur inconnue')).slice(0, 200)
+const errorMessage = (cause: unknown) => errorText(cause, 'Erreur inconnue').slice(0, 200)
+
+/** Counts what a push sent and what the server refused. */
+export type PushStats = { sent: number; failed: number; errors: string[] }
+
+/** Puts a refused operation back in the queue for an immediate new attempt. */
+export async function retryOp(seq: number) {
+  const op = await idbRequest<OutboxOp | undefined>('outbox', 'readonly', (store) => store.get(seq))
+  if (op) await saveOp({ ...op, state: 'pending', attempts: 0, lastError: null })
+}
 
 /** Replays queued operations in order. Stops at the first network failure. */
-export async function flushOutbox(beforeOp?: (op: OutboxOp) => Promise<void>): Promise<'done' | 'offline'> {
+export async function flushOutbox(beforeOp?: (op: OutboxOp) => Promise<void>, stats?: PushStats): Promise<'done' | 'offline'> {
   const idMap = await getIdMap()
   for (const op of await listOutbox()) {
     const executor = executors.get(op.op)
@@ -65,9 +75,11 @@ export async function flushOutbox(beforeOp?: (op: OutboxOp) => Promise<void>): P
       const realId = (record as { id?: unknown } | null)?.id
       if (op.tempId && typeof realId === 'string') { idMap[op.tempId] = realId; await writeCache(ID_MAP_KEY, idMap) }
       await removeOp(op.seq!)
+      if (stats) stats.sent += 1
     } catch (cause) {
       if (isNetworkError(cause)) return 'offline'
       await saveOp({ ...op, state: 'error', attempts: op.attempts + 1, lastError: errorMessage(cause) })
+      if (stats && op.state !== 'error') { stats.failed += 1; stats.errors.push(`${op.label} : ${errorMessage(cause)}`) }
     }
   }
   return 'done'

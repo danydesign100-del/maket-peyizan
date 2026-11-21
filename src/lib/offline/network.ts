@@ -31,7 +31,14 @@ export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 /** Checks that the backend actually answers; `navigator.onLine` alone is unreliable. */
-export async function probeConnection(): Promise<boolean> {
+let probing: Promise<boolean> | null = null
+export function probeConnection(): Promise<boolean> {
+  // Many requests can fail at once (a Wi-Fi drop, a device waking up): one check answers them all.
+  probing ??= runProbe().finally(() => { probing = null })
+  return probing
+}
+
+async function runProbe(): Promise<boolean> {
   if (typeof navigator !== 'undefined' && !navigator.onLine) { markOffline(); return false }
   const url = isLocalDbConfigured
     ? `${import.meta.env.VITE_API_URL || 'http://localhost:3001'}/health`

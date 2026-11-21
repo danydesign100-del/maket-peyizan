@@ -6,8 +6,17 @@ import { PageHeader } from '../components/PageHeader'
 import { posService } from '../services/posService'
 import { useAuth } from '../contexts/AuthContext'
 import { getSupabaseClient, isLocalDbConfigured } from '../lib/supabase'
-import { cachedRead } from '../lib/offline/wrap'
+import { readCache, writeCache } from '../lib/offline/cache'
+import { isNetworkError, probeConnection } from '../lib/offline/network'
+import { isOnline, useSyncStatus } from '../lib/offline/status'
+import { errorText } from '../lib/errors'
+import { pendingSales, type OfflineSale } from '../services/offlineSales'
+import { CloudOff, Clock } from 'lucide-react'
 import { localApi } from '../lib/localApi'
+import { formatDay } from '../lib/period'
+import { PrintHeader } from '../components/PrintHeader'
+import { PAYMENT_METHOD_LABELS } from '../types/pos'
+import { cashService } from '../services/cashService'
 
 type PaymentSummary = {
   method: string
@@ -17,6 +26,7 @@ type PaymentSummary = {
 
 type DailyReport = {
   date: string
+  sessionId: string | null
   openingAmount: number
   closingAmount: number | null
   totalSales: number
@@ -32,105 +42,79 @@ type DailyReport = {
 }
 
 export function DailyReceiptsPage() {
-  const { profile } = useAuth()
-  const canViewDailyReceipts = profile?.role?.code === 'director' || 
-                               profile?.role?.code === 'administrator' || 
-                               profile?.role?.code === 'cashier'
+  const { profile, can } = useAuth()
+  const canViewDailyReceipts = can('pos.sell')
   
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0])
+  const [selectedDate, setSelectedDate] = useState(() => { const now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset()); return now.toISOString().slice(0, 10) })
   const [report, setReport] = useState<DailyReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [closingAmount, setClosingAmount] = useState<number | null>(null)
   const [showCloseForm, setShowCloseForm] = useState(false)
   const [success, setSuccess] = useState<string | null>(null)
+  // Where the figures come from, and the sales of the day still waiting on this device.
+  const [origin, setOrigin] = useState<{ kind: 'server' | 'cache' | 'none'; at: string | null }>({ kind: 'server', at: null })
+  const [waiting, setWaiting] = useState<OfflineSale[]>([])
+  const { online, lastSyncAt } = useSyncStatus()
 
+  // Reloaded when the date changes, the connection returns or a synchronisation ends.
   useEffect(() => {
     void loadReport()
-  }, [selectedDate])
+  }, [selectedDate, online, lastSyncAt])
 
   const fetchReport = async (): Promise<DailyReport> => {
+    // Bounds of the selected local day, in UTC.
+    const dayStart = new Date(`${selectedDate}T00:00:00`)
+    const dayEnd = new Date(dayStart)
+    dayEnd.setDate(dayEnd.getDate() + 1)
+
     if (isLocalDbConfigured) {
-      const rows = await localApi.query<any>(`
-        select 
-          date(s.sold_at) as report_date,
-          coalesce(sum(case when s.status = 'completed' then s.total_amount else 0 end), 0) as total_sales,
-          coalesce(sum(case when s.status = 'refunded' then s.total_amount else 0 end), 0) as refund_total,
-          coalesce(count(case when s.status = 'refunded' then 1 end), 0) as refund_count,
-          coalesce(sum(case when s.status = 'cancelled' then s.total_amount else 0 end), 0) as cancelled_total,
-          coalesce(count(case when s.status = 'cancelled' then 1 end), 0) as cancelled_count,
-          coalesce(
-            (select sum(amount) from payments sp where sp.sale_id = s.id),
-            0
-          ) as total_payments
-        from sales s
-        where date(s.sold_at) = ?
-        group by date(s.sold_at)
-      `, [selectedDate])
-      
-      if (rows.length === 0) {
-        return {
-          date: selectedDate,
-          openingAmount: 0,
-          closingAmount: null,
-          totalSales: 0,
-          totalPayments: 0,
-          expectedCash: 0,
-          difference: null,
-          paymentBreakdown: [],
-          refundCount: 0,
-          refundTotal: 0,
-          cancelledCount: 0,
-          cancelledTotal: 0,
-          sales: []
-        }
-      }
-
-      const paymentRows = await localApi.query<any>(`
-        select 
-          sp.method,
-          count(*) as count,
-          sum(sp.amount) as total
-        from payments sp
-        join sales s on s.id = sp.sale_id
-        where date(s.sold_at) = ? and s.status = 'completed'
-        group by sp.method
-      `, [selectedDate])
-
+      // SQLite stores UTC as 'YYYY-MM-DD HH:MM:SS' or ISO; datetime() normalises both.
+      const bounds = [dayStart, dayEnd].map((date) => date.toISOString().replace('T', ' ').slice(0, 19))
       const salesRows = await localApi.query<any>(`
         select s.*, c.full_name as customer_name
         from sales s
         left join customers c on c.id = s.customer_id
-        where date(s.sold_at) = ?
+        where datetime(s.sold_at) >= ? and datetime(s.sold_at) < ?
         order by s.sold_at desc
-      `, [selectedDate])
-
+      `, bounds)
+      const paymentRows = await localApi.query<any>(`
+        select sp.method, count(*) as count, sum(sp.amount) as total
+        from payments sp
+        join sales s on s.id = sp.sale_id
+        where datetime(s.sold_at) >= ? and datetime(s.sold_at) < ? and s.status = 'completed'
+        group by sp.method
+      `, bounds)
       const sessionRows = await localApi.query<any>(`
-        select * from cash_sessions 
-        where date(opened_at) = ? 
-        order by opened_at desc 
+        select * from cash_sessions
+        where datetime(opened_at) >= ? and datetime(opened_at) < ?
+        order by opened_at desc
         limit 1
-      `, [selectedDate])
+      `, bounds)
 
-      const session = sessionRows[0] as { opening_amount?: number; closing_amount?: number } | null
+      const session = sessionRows[0] as { id: string; opening_amount?: number; closing_amount?: number | null } | undefined
+      const byStatus = (status: string) => salesRows.filter((sale: any) => sale.status === status)
+      const sum = (rows: any[]) => rows.reduce((total: number, sale: any) => total + Number(sale.total_amount), 0)
+      const paymentBreakdown = paymentRows.map((row: any) => ({ method: row.method, count: Number(row.count), total: Number(row.total) }))
+      const cash = paymentBreakdown.find((payment) => payment.method === 'cash')?.total ?? 0
+      const openingAmount = Number(session?.opening_amount ?? 0)
+      const closingAmount = session?.closing_amount == null ? null : Number(session.closing_amount)
+      const expectedCash = openingAmount + cash
 
       return {
         date: selectedDate,
-        openingAmount: session?.opening_amount || 0,
-        closingAmount: session?.closing_amount || null,
-        totalSales: Number(rows[0].total_sales),
-        totalPayments: Number(rows[0].total_payments),
-        expectedCash: session?.opening_amount || 0,
-        difference: session?.closing_amount ? Number(session.closing_amount) - (session?.opening_amount || 0) : null,
-        paymentBreakdown: paymentRows.map((row: any) => ({
-          method: row.method,
-          count: row.count,
-          total: Number(row.total)
-        })),
-        refundCount: Number(rows[0].refund_count),
-        refundTotal: Number(rows[0].refund_total),
-        cancelledCount: Number(rows[0].cancelled_count),
-        cancelledTotal: Number(rows[0].cancelled_total),
+        sessionId: session?.id ?? null,
+        openingAmount,
+        closingAmount,
+        totalSales: sum(byStatus('completed')),
+        totalPayments: paymentBreakdown.reduce((total, payment) => total + payment.total, 0),
+        expectedCash,
+        difference: closingAmount === null ? null : closingAmount - expectedCash,
+        paymentBreakdown,
+        refundCount: byStatus('refunded').length,
+        refundTotal: sum(byStatus('refunded')),
+        cancelledCount: byStatus('cancelled').length,
+        cancelledTotal: sum(byStatus('cancelled')),
         sales: salesRows
       }
     } else {
@@ -139,8 +123,8 @@ export function DailyReceiptsPage() {
       const { data: salesData, error: salesError } = await client
         .from('sales')
         .select('*, customer:customers(full_name), payments(*)')
-        .gte('sold_at', selectedDate)
-        .lt('sold_at', new Date(new Date(selectedDate).getTime() + 24 * 60 * 60 * 1000).toISOString())
+        .gte('sold_at', dayStart.toISOString())
+        .lt('sold_at', dayEnd.toISOString())
         .order('sold_at', { ascending: false })
 
       if (salesError) throw salesError
@@ -170,24 +154,22 @@ export function DailyReceiptsPage() {
         })
       })
 
-      const { data: sessionData } = await client
-        .from('cash_sessions')
-        .select('*')
-        .gte('opened_at', selectedDate)
-        .lt('opened_at', new Date(new Date(selectedDate).getTime() + 24 * 60 * 60 * 1000).toISOString())
-        .order('opened_at', { ascending: false })
-        .limit(1)
-
-      const session = sessionData?.[0] as { opening_amount?: number; closing_amount?: number } | null
+      // Same figures as the cash report: opening + cash sales − refunds ± cash movements.
+      const { data: sessions, error: sessionError } = await cashService.sessionReport(selectedDate, selectedDate, null)
+      if (sessionError) throw sessionError
+      const session = sessions?.[0]
+      const openingAmount = Number(session?.opening_amount ?? 0)
+      const cash = paymentBreakdown.find((payment) => payment.method === 'cash')?.total ?? 0
 
       return {
         date: selectedDate,
-        openingAmount: session?.opening_amount || 0,
-        closingAmount: session?.closing_amount || null,
+        sessionId: session?.session_id ?? null,
+        openingAmount,
+        closingAmount: session?.counted == null ? null : Number(session.counted),
         totalSales,
-        totalPayments: totalSales,
-        expectedCash: session?.opening_amount || 0,
-        difference: session?.closing_amount ? Number(session.closing_amount) - (session?.opening_amount || 0) : null,
+        totalPayments: paymentBreakdown.reduce((total, payment) => total + payment.total, 0),
+        expectedCash: session ? Number(session.theoretical) : openingAmount + cash,
+        difference: session?.difference == null ? null : Number(session.difference),
         paymentBreakdown,
         refundCount: refundedSales.length,
         refundTotal,
@@ -201,14 +183,43 @@ export function DailyReceiptsPage() {
   const loadReport = async () => {
     setLoading(true)
     setError(null)
+    const key = `daily-report:${selectedDate}`
     try {
-      setReport(await cachedRead(`daily-report:${selectedDate}`, fetchReport, { style: 'throw' }))
+      // Sales of that local day not yet on the server (shown apart, added to the totals).
+      const day = (sale: OfflineSale) => new Date(sale.input.soldAt ?? sale.createdAt).toLocaleDateString('en-CA')
+      setWaiting((await pendingSales().catch(() => [])).filter((sale) => sale.state !== 'synced' && day(sale) === selectedDate))
+      let next: DailyReport | null = null
+      if (isOnline()) {
+        try {
+          next = await fetchReport()
+          await writeCache(key, next)
+          setOrigin({ kind: 'server', at: new Date().toISOString() })
+        } catch (cause) {
+          if (!isNetworkError(cause)) throw cause
+          await probeConnection()
+        }
+      }
+      if (!next) {
+        // Offline: the last figures received for this date, if any.
+        const cached = await readCache<DailyReport>(key)
+        next = cached?.value ?? null
+        setOrigin({ kind: cached ? 'cache' : 'none', at: cached?.savedAt ?? null })
+      }
+      setReport(next ?? { date: selectedDate, sessionId: null, openingAmount: 0, closingAmount: null, totalSales: 0, totalPayments: 0, expectedCash: 0, difference: null, paymentBreakdown: [], refundCount: 0, refundTotal: 0, cancelledCount: 0, cancelledTotal: 0, sales: [] })
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Erreur de chargement')
+      setError(errorText(cause, 'Erreur de chargement'))
     } finally {
       setLoading(false)
     }
   }
+  // A pending sale is worth its items (a cash payment holds the amount tendered, change included).
+  const saleTotal = (sale: OfflineSale) => sale.input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice - item.discount + item.taxRate, 0)
+  const waitingTotal = waiting.reduce((sum, sale) => sum + saleTotal(sale), 0)
+  const waitingByMethod = waiting.reduce((map, sale) => {
+    const shares = sale.input.payments.length === 1 ? [{ method: sale.input.payments[0].method, amount: saleTotal(sale) }] : sale.input.payments.map((payment) => ({ method: payment.method, amount: Number(payment.amount) }))
+    for (const share of shares) map.set(share.method, { count: (map.get(share.method)?.count ?? 0) + 1, total: (map.get(share.method)?.total ?? 0) + share.amount })
+    return map
+  }, new Map<string, { count: number; total: number }>())
 
   const closeDay = async () => {
     if (!closingAmount || closingAmount < 0) return setError('Montant invalide')
@@ -217,10 +228,11 @@ export function DailyReceiptsPage() {
     setError(null)
     try {
       if (isLocalDbConfigured) {
+        if (!report?.sessionId) throw new Error('Aucune session de caisse ouverte ce jour-là.')
         await localApi.mutate('update', 'cash_sessions', {
           closed_at: new Date().toISOString(),
           closing_amount: closingAmount
-        }, report?.date)
+        }, report.sessionId)
       } else {
         await posService.closeSession(closingAmount, `Clôture journalière ${selectedDate}`)
       }
@@ -237,14 +249,7 @@ export function DailyReceiptsPage() {
 
   const formatMoney = (value: number) => new Intl.NumberFormat('fr-HT', { style: 'currency', currency: 'HTG', maximumFractionDigits: 2 }).format(value)
 
-  const paymentMethodLabels: Record<string, string> = {
-    cash: 'Espèces',
-    card: 'Carte',
-    moncash: 'MonCash',
-    natcash: 'NatCash',
-    bank_transfer: 'Virement',
-    check: 'Chèque'
-  }
+  const paymentMethodLabels = PAYMENT_METHOD_LABELS
 
   if (!canViewDailyReceipts) {
     return (
@@ -261,7 +266,8 @@ export function DailyReceiptsPage() {
 
   return (
     <div>
-      <PageHeader title="Recettes journalières" description="Suivi des encaissements et contrôle de caisse" />
+      <div className="print:hidden"><PageHeader title="Recettes journalières" description="Suivi des encaissements et contrôle de caisse" /></div>
+      <PrintHeader title="Recettes journalières" period={`Journée du ${formatDay(selectedDate)}`} note={profile?.full_name ? `Imprimé par ${profile.full_name}` : undefined} />
       
       {error && <div className="mt-4 rounded bg-red-50 p-3 text-red-800">{error}</div>}
       {success && <div className="mt-4 rounded bg-emerald-50 p-3 text-emerald-800">{success}</div>}
@@ -287,16 +293,25 @@ export function DailyReceiptsPage() {
       ) : report && (
         <div className="mt-6 space-y-6">
           {/* Résumé */}
+          <p role="status" className={`flex items-start gap-2 rounded-xl border px-4 py-3 text-sm ${origin.kind === 'server' ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+            {origin.kind === 'server' ? <Check className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" /> : <CloudOff className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />}
+            <span>{origin.kind === 'server' ? `Données du serveur, actualisées à ${origin.at ? new Date(origin.at).toLocaleTimeString('fr-HT', { hour: '2-digit', minute: '2-digit' }) : ''}.`
+              : origin.kind === 'cache' ? `Hors ligne : copie locale du ${new Date(origin.at!).toLocaleString('fr-HT', { dateStyle: 'short', timeStyle: 'short' })}. Actualisation automatique au retour de la connexion.`
+              : 'Hors ligne : aucune copie locale des ventes déjà synchronisées pour cette date. Seules les ventes enregistrées sur cet appareil sont affichées.'}
+              {waiting.length > 0 && ` ${waiting.length} vente(s) de cet appareil en attente de synchronisation (${formatMoney(waitingTotal)}) sont incluses ci-dessous.`}</span>
+          </p>
           <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-            <h2 className="text-lg font-semibold">Résumé du {new Date(report.date).toLocaleDateString('fr-FR')}</h2>
+            <h2 className="text-lg font-semibold">Résumé du {formatDay(report.date)}</h2>
             <div className="mt-4 grid gap-4 md:grid-cols-4">
               <div className="rounded-lg bg-slate-50 p-4">
                 <p className="text-sm text-slate-600">Ventes totales</p>
-                <p className="mt-1 text-2xl font-bold">{formatMoney(report.totalSales)}</p>
+                <p className="mt-1 text-2xl font-bold">{formatMoney(report.totalSales + waitingTotal)}</p>
+                {waiting.length > 0 && <p className="text-xs text-amber-700">dont {formatMoney(waitingTotal)} en attente</p>}
               </div>
               <div className="rounded-lg bg-slate-50 p-4">
                 <p className="text-sm text-slate-600">Encaissements</p>
-                <p className="mt-1 text-2xl font-bold">{formatMoney(report.totalPayments)}</p>
+                <p className="mt-1 text-2xl font-bold">{formatMoney(report.totalPayments + waitingTotal)}</p>
+                {waiting.length > 0 && <p className="text-xs text-amber-700">dont {formatMoney(waitingTotal)} en attente</p>}
               </div>
               <div className="rounded-lg bg-slate-50 p-4">
                 <p className="text-sm text-slate-600">Remboursements</p>
@@ -328,7 +343,14 @@ export function DailyReceiptsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {report.paymentBreakdown.length === 0 ? (
+                  {[...waitingByMethod].map(([method, row]) => (
+                    <tr key={`waiting-${method}`} className="border-t bg-amber-50/60">
+                      <td className="p-3 font-medium">{paymentMethodLabels[method] || method} <span className="text-xs font-normal text-amber-700">(en attente)</span></td>
+                      <td className="p-3">{row.count}</td>
+                      <td className="p-3 font-medium">{formatMoney(row.total)}</td>
+                    </tr>
+                  ))}
+                  {report.paymentBreakdown.length === 0 && waiting.length > 0 ? null : report.paymentBreakdown.length === 0 ? (
                     <tr><td colSpan={3} className="p-6 text-center text-slate-500">Aucun paiement</td></tr>
                   ) : report.paymentBreakdown.map((payment) => (
                     <tr key={payment.method} className="border-t">
@@ -341,21 +363,35 @@ export function DailyReceiptsPage() {
                 <tfoot className="bg-slate-50 font-semibold">
                   <tr>
                     <td className="p-3">Total</td>
-                    <td className="p-3">{report.paymentBreakdown.reduce((sum, p) => sum + p.count, 0)}</td>
-                    <td className="p-3">{formatMoney(report.paymentBreakdown.reduce((sum, p) => sum + p.total, 0))}</td>
+                    <td className="p-3">{report.paymentBreakdown.reduce((sum, p) => sum + p.count, 0) + [...waitingByMethod.values()].reduce((sum, row) => sum + row.count, 0)}</td>
+                    <td className="p-3">{formatMoney(report.paymentBreakdown.reduce((sum, p) => sum + p.total, 0) + waitingTotal)}</td>
                   </tr>
                 </tfoot>
               </table>
             </div>
           </div>
           
+          {waiting.length > 0 && <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-amber-200">
+            <h2 className="flex items-center gap-2 text-lg font-semibold"><Clock className="h-5 w-5 text-amber-600" aria-hidden="true" />En attente de synchronisation</h2>
+            <p className="mt-1 text-sm text-slate-600">Ventes enregistrées sur cet appareil, pas encore reçues par le serveur. Elles seront envoyées automatiquement.</p>
+            <ul className="mt-4 divide-y divide-slate-100 text-sm">{waiting.map((sale) => <li key={sale.id} className="flex flex-wrap justify-between gap-3 py-2">
+              <span><span className="tabular-nums text-slate-500">{new Date(sale.input.soldAt ?? sale.createdAt).toLocaleTimeString('fr-HT', { hour: '2-digit', minute: '2-digit' })}</span> · {sale.input.items.map((item) => `${item.quantity} × ${item.name}`).join(', ')}
+                {sale.state === 'sync_error' && <span className="block text-xs text-red-700">Refusée : {sale.lastError}</span>}</span>
+              <span className="font-semibold tabular-nums">{formatMoney(saleTotal(sale))} <span className="font-normal text-slate-500">· {sale.input.payments.map((payment) => paymentMethodLabels[payment.method] || payment.method).join(', ')}</span></span>
+            </li>)}</ul>
+          </div>}
+
           {/* Contrôle de caisse */}
           <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
             <h2 className="text-lg font-semibold">Contrôle de caisse</h2>
-            <div className="mt-4 grid gap-4 md:grid-cols-3">
+            <div className="mt-4 grid gap-4 md:grid-cols-4">
               <div>
                 <p className="text-sm text-slate-600">Montant d'ouverture</p>
                 <p className="mt-1 text-xl font-bold">{formatMoney(report.openingAmount)}</p>
+              </div>
+              <div>
+                <p className="text-sm text-slate-600">Espèces attendues</p>
+                <p className="mt-1 text-xl font-bold">{formatMoney(report.expectedCash)}</p>
               </div>
               <div>
                 <p className="text-sm text-slate-600">Montant de clôture</p>
@@ -366,12 +402,12 @@ export function DailyReceiptsPage() {
               <div>
                 <p className="text-sm text-slate-600">Écart</p>
                 <p className={`mt-1 text-xl font-bold ${report.difference !== null && Math.abs(report.difference) > 0.01 ? 'text-red-600' : 'text-emerald-600'}`}>
-                  {report.difference !== null ? formatMoney(report.difference) : '—'}
+                  {report.difference !== null ? formatMoney(report.difference) : '-'}
                 </p>
               </div>
             </div>
             
-            {!report.closingAmount && (
+            {report.closingAmount === null && (
               <div className="no-print mt-4">
                 {!showCloseForm ? (
                   <button onClick={() => setShowCloseForm(true)} className="ui-button-primary">
@@ -420,7 +456,7 @@ export function DailyReceiptsPage() {
                     <tr key={sale.id} className="border-t">
                       <td className="p-3 font-mono">{sale.sale_number || sale.id.slice(0, 8)}</td>
                       <td className="p-3">{new Date(sale.sold_at).toLocaleTimeString('fr-FR')}</td>
-                      <td className="p-3">{sale.customer_name || '—'}</td>
+                      <td className="p-3">{sale.customer_name || '-'}</td>
                       <td className="p-3 font-medium">{formatMoney(Number(sale.total_amount))}</td>
                       <td className="p-3">
                         <span className={`rounded px-2 py-1 text-xs ${

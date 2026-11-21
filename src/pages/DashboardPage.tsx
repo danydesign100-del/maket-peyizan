@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { ArrowLeftRight, ArrowRight, Banknote, Coins, CalendarCheck, ChartColumn, FileText, Package, PackagePlus, PackageX, ShoppingCart, TriangleAlert, UserPlus, Wallet, Warehouse, type LucideIcon } from 'lucide-react'
 import { Skeleton } from '../components/Skeleton'
 import { useAuth } from '../contexts/AuthContext'
+import type { PermissionCode } from '../lib/permissions'
 import { useSyncStatus } from '../lib/offline/status'
 import { getInventoryMetrics, getSalesMetrics, getSalesTrend, getTopProducts, localDay, type DailySales, type TopProduct } from '../services/dashboardService'
 import { ColumnChart } from '../components/charts/ColumnChart'
@@ -13,17 +14,17 @@ type SalesMetrics = { salesCount: number; totalSales: number; transactionCount: 
 const formatMoney = (value: number) => new Intl.NumberFormat('fr-HT', { style: 'currency', currency: 'HTG', maximumFractionDigits: 2 }).format(value)
 const formatCount = (value: number) => new Intl.NumberFormat('fr-HT').format(Math.round(value))
 
-type Shortcut = { to: string; label: string; hint: string; icon: LucideIcon; tone: string; roles: string[] }
+type Shortcut = { to: string; label: string; hint: string; icon: LucideIcon; tone: string; needs: PermissionCode[] }
 const shortcuts: Shortcut[] = [
-  { to: '/caisse', label: 'Nouvelle vente', hint: 'Point de vente', icon: ShoppingCart, tone: 'bg-brand-100 text-brand-800', roles: ['cashier', 'director', 'administrator'] },
-  { to: '/comptage-caisse', label: 'Comptage de caisse', hint: 'Début et fin de quart', icon: Coins, tone: 'bg-accent-100 text-amber-800', roles: ['cashier', 'director', 'administrator', 'accountant'] },
-  { to: '/produits', label: 'Ajouter un produit', hint: 'Catalogue', icon: PackagePlus, tone: 'bg-sky-50 text-sky-700', roles: ['director', 'administrator', 'stock_manager'] },
-  { to: '/stock', label: 'Mouvement de stock', hint: 'Entrées et sorties', icon: ArrowLeftRight, tone: 'bg-violet-50 text-violet-700', roles: ['director', 'administrator', 'stock_manager'] },
-  { to: '/clients', label: 'Nouveau client', hint: 'Répertoire', icon: UserPlus, tone: 'bg-amber-50 text-amber-700', roles: ['cashier', 'director', 'administrator'] },
-  { to: '/proformas', label: 'Proforma', hint: 'Devis client', icon: FileText, tone: 'bg-teal-50 text-teal-700', roles: ['cashier', 'director', 'administrator'] },
-  { to: '/recettes-journalieres', label: 'Recettes du jour', hint: 'Clôture de caisse', icon: CalendarCheck, tone: 'bg-emerald-50 text-emerald-700', roles: ['cashier', 'director', 'administrator'] },
-  { to: '/depenses', label: 'Dépense', hint: 'Sorties d’argent', icon: Wallet, tone: 'bg-rose-50 text-rose-700', roles: ['director', 'administrator', 'accountant'] },
-  { to: '/rapports', label: 'Rapports', hint: 'Bilan et résultat', icon: ChartColumn, tone: 'bg-indigo-50 text-indigo-700', roles: ['director', 'administrator', 'accountant'] },
+  { to: '/caisse', label: 'Nouvelle vente', hint: 'Point de vente', icon: ShoppingCart, tone: 'bg-brand-100 text-brand-800', needs: ['pos.sell'] },
+  { to: '/comptage-caisse', label: 'Comptage de caisse', hint: 'Début et fin de quart', icon: Coins, tone: 'bg-accent-100 text-amber-800', needs: ['cash.count', 'cash.movements'] },
+  { to: '/produits', label: 'Ajouter un produit', hint: 'Catalogue', icon: PackagePlus, tone: 'bg-sky-50 text-sky-700', needs: ['catalog.manage'] },
+  { to: '/stock', label: 'Mouvement de stock', hint: 'Entrées et sorties', icon: ArrowLeftRight, tone: 'bg-violet-50 text-violet-700', needs: ['stock.movements'] },
+  { to: '/clients', label: 'Nouveau client', hint: 'Répertoire', icon: UserPlus, tone: 'bg-amber-50 text-amber-700', needs: ['customers.manage'] },
+  { to: '/proformas', label: 'Proforma', hint: 'Devis client', icon: FileText, tone: 'bg-teal-50 text-teal-700', needs: ['proformas.manage'] },
+  { to: '/recettes-journalieres', label: 'Recettes du jour', hint: 'Clôture de caisse', icon: CalendarCheck, tone: 'bg-emerald-50 text-emerald-700', needs: ['pos.sell'] },
+  { to: '/depenses', label: 'Dépense', hint: 'Sorties d’argent', icon: Wallet, tone: 'bg-rose-50 text-rose-700', needs: ['expenses.manage'] },
+  { to: '/rapports', label: 'Rapports', hint: 'Bilan et résultat', icon: ChartColumn, tone: 'bg-indigo-50 text-indigo-700', needs: ['accounting.manage'] },
 ]
 
 const reducedMotion = () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -66,18 +67,18 @@ function StatCard({ card, index }: { card: Card; index: number }) {
     </div>
     {card.value !== undefined
       ? <p className={`mt-3 text-3xl font-bold tracking-tight tabular-nums ${card.tone}`}>{card.money ? formatMoney(animated) : formatCount(animated)}</p>
-      : card.failed ? <p className="mt-3 text-3xl font-bold tracking-tight text-slate-400">—</p> : <Skeleton className="mt-4 h-8 w-2/3" />}
+      : card.failed ? <p className="mt-3 text-3xl font-bold tracking-tight text-slate-400">-</p> : <Skeleton className="mt-4 h-8 w-2/3" />}
     <p className="mt-2 text-xs leading-5 text-slate-500">{card.hint}</p>
   </article>
 }
 
 function CountBadge({ value, failed, tone }: { value?: number; failed: boolean; tone: string }) {
   if (value === undefined && !failed) return <Skeleton className="h-6 w-10 rounded-full" />
-  return <span className={Number(value) > 0 ? `ui-badge ${tone}` : 'ui-badge ui-badge-neutral'}>{value ?? '—'}</span>
+  return <span className={Number(value) > 0 ? `ui-badge ${tone}` : 'ui-badge ui-badge-neutral'}>{value ?? '-'}</span>
 }
 
 export function DashboardPage() {
-  const { profile } = useAuth()
+  const { profile, can } = useAuth()
   const { online, pending } = useSyncStatus()
   const now = useNow()
   const [metrics, setMetrics] = useState<Metrics | null>(null)
@@ -99,8 +100,7 @@ export function DashboardPage() {
     ]).finally(() => setChartsSettled(true))
   }, [])
 
-  const role = profile?.role?.code ?? ''
-  const visibleShortcuts = shortcuts.filter((item) => item.roles.includes(role))
+  const visibleShortcuts = shortcuts.filter((item) => item.needs.some(can))
   const firstName = (profile?.full_name || '').split(' ')[0]
   const hour = now.getHours()
   const greeting = hour < 12 ? 'Bonjour' : hour < 18 ? 'Bon après-midi' : 'Bonsoir'
@@ -136,7 +136,7 @@ export function DashboardPage() {
         </div>
         <div className="rounded-xl bg-white/[0.07] px-5 py-4 ring-1 ring-white/10 backdrop-blur-sm">
           <p className="text-xs font-medium text-white/60">Recettes du jour</p>
-          {salesMetrics ? <p className="mt-1 text-2xl font-bold tabular-nums">{formatMoney(todaySales)}</p> : salesFailed ? <p className="mt-1 text-2xl font-bold">—</p> : <span className="shimmer-dark mt-2 block h-7 w-36" />}
+          {salesMetrics ? <p className="mt-1 text-2xl font-bold tabular-nums">{formatMoney(todaySales)}</p> : salesFailed ? <p className="mt-1 text-2xl font-bold">-</p> : <span className="shimmer-dark mt-2 block h-7 w-36" />}
           <p className="mt-1 text-xs text-white/50">{salesMetrics?.salesCount ?? 0} vente(s) · {new Intl.DateTimeFormat('fr-HT', { timeStyle: 'short' }).format(now)}</p>
         </div>
       </div>

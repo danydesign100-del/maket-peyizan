@@ -4,6 +4,7 @@
 //
 //   node scripts/create-first-admin.mjs            create the account
 //   node scripts/create-first-admin.mjs --check    only check the project state
+//   node scripts/create-first-admin.mjs --test     same, for the test version (.env.test.local)
 //
 // Requires the Supabase CLI to be signed in (npx supabase login) and the project
 // settings in .env.production.local (VITE_SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY).
@@ -23,10 +24,11 @@ function readEnv(file) {
   return values
 }
 
-const env = readEnv(new URL('../.env.production.local', import.meta.url))
+const ENV_FILE = process.argv.includes('--test') ? '.env.test.local' : '.env.production.local'
+const env = readEnv(new URL(`../${ENV_FILE}`, import.meta.url))
 const url = env.VITE_SUPABASE_URL
 const publishable = env.VITE_SUPABASE_PUBLISHABLE_KEY
-if (!url || !publishable) throw new Error('VITE_SUPABASE_URL or VITE_SUPABASE_PUBLISHABLE_KEY missing from .env.production.local')
+if (!url || !publishable) throw new Error(`VITE_SUPABASE_URL or VITE_SUPABASE_PUBLISHABLE_KEY missing from ${ENV_FILE}`)
 const ref = new URL(url).hostname.split('.')[0]
 
 async function call(path, { key = publishable, token, method = 'GET', body } = {}) {
@@ -61,7 +63,7 @@ const askHidden = (question) => new Promise((resolve) => {
 })
 
 try {
-  console.log(`Projet Supabase : ${ref}`)
+  console.log(`Projet Supabase : ${ref} (${ENV_FILE === '.env.test.local' ? 'version de test' : 'production'})`)
   const complete = await call('/rest/v1/rpc/is_initial_setup_complete', { method: 'POST', body: {} })
   if (complete) { console.log('Un administrateur existe déjà : rien à faire. Connectez-vous sur le site.'); process.exit(0) }
   // Without --reveal the CLI returns a masked secret key, which Supabase rejects.

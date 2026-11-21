@@ -1,3 +1,4 @@
+import { TestVersionBanner } from '../components/TestVersionBanner'
 import { ArrowLeft, LogIn, Mail } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { Navigate, useLocation, useNavigate } from 'react-router-dom'
@@ -108,6 +109,7 @@ export function LoginPage() {
   
   return (
     <main className="grid min-h-screen bg-[#f6f8f6] lg:grid-cols-2">
+      <TestVersionBanner className="fixed inset-x-4 top-4 z-10 justify-center lg:inset-x-auto lg:right-6" />
       <section className="hidden bg-brand-950 p-12 text-white lg:flex lg:flex-col lg:justify-between">
         <div className="flex items-center gap-3">
           <span className="grid h-10 w-10 place-items-center rounded-xl bg-accent-500 font-black text-brand-950">MP</span>
@@ -174,8 +176,8 @@ export function LoginPage() {
                   </label>
                 )}
                 <label className="mt-4 block text-sm font-semibold text-slate-700">
-                  E-mail
-                  <input required type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} className="mt-1.5 w-full" />
+                  {createMode ? 'E-mail' : 'E-mail ou nom d’utilisateur'}
+                  <input required type={createMode ? 'email' : 'text'} autoComplete={createMode ? 'email' : 'username'} autoCapitalize="none" value={email} onChange={(event) => setEmail(event.target.value)} className="mt-1.5 w-full" />
                 </label>
                 <label className="mt-4 block text-sm font-semibold text-slate-700">
                   Mot de passe
@@ -205,7 +207,7 @@ export function LoginPage() {
                     onClick={() => { setCreateMode((value) => !value); setError(null); setNotice(null) }}
                     className="mt-3 w-full text-sm font-semibold text-brand-700 hover:underline"
                   >
-                    {createMode ? 'Mwen deja gen kont — konekte' : 'Kreye premye administratè a'}
+                    {createMode ? 'Mwen deja gen kont - konekte' : 'Kreye premye administratè a'}
                   </button>
                 )}
               </>

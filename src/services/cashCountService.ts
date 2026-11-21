@@ -51,7 +51,7 @@ const service = {
         const total = await localApi.query<{ total: number }>(`select count(*) as total from cash_counts cc ${where}`, bounds)
         return { data: rows.map(fromRow), error: null, count: Number(total[0]?.total ?? 0) }
       }
-      let query = getSupabaseClient().from('cash_counts').select('*, submitter:profiles(full_name)', { count: 'exact' })
+      let query = getSupabaseClient().from('cash_counts').select('*, submitter:profiles!cash_counts_submitted_by_fkey(full_name)', { count: 'exact' })
       if (day) { const [start, end] = dayBounds(day); query = query.gte('counted_at', start).lt('counted_at', end) }
       const { data, error, count } = await query.order('counted_at', { ascending: false }).range(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE - 1)
       if (error) return { data: null, error: new Error(error.message), count: null }

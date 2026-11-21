@@ -2,13 +2,32 @@ import { getSessionUser, getSupabaseClient, isLocalDbConfigured } from '../lib/s
 import { localApi } from '../lib/localApi'
 import type { CartItem, CashSessionInput, SaleInput } from '../types/pos'
 import type { Product } from '../types/catalog'
-import { enqueueSale } from './offlineSales'
+import { deleteOfflineSale, enqueueSale, getOfflineSale, pendingSales } from './offlineSales'
+import { isOnline } from '../lib/offline/status'
 import { pushChanges } from './syncService'
 import { withOffline } from '../lib/offline/wrap'
 import { readCache, writeCache } from '../lib/offline/cache'
 import { getSnapshot, patchSnapshot } from '../lib/offline/snapshot'
 
 const cashSessionsTable = () => getSupabaseClient().from('cash_sessions')
+
+/**
+ * A MonCash/NatCash transaction ID can be used only once. Checked before the sale
+ * is queued: against the sales waiting on this device and, when online, against
+ * the server. Offline, the server still refuses a reused ID at sync.
+ */
+async function assertReferencesUnused(input: SaleInput) {
+  const key = (value?: string | null) => (value ?? '').trim().toLowerCase()
+  for (const payment of input.payments.filter((item) => item.method === 'moncash' || item.method === 'natcash')) {
+    const network = payment.method === 'moncash' ? 'MonCash' : 'NatCash'
+    if (!key(payment.reference)) throw new Error(`Référence de transaction ${network} obligatoire`)
+    const queued = (await pendingSales()).some((sale) => sale.state !== 'sync_error' && sale.input.payments.some((other) => other.method === payment.method && key(other.reference) === key(payment.reference)))
+    if (queued) throw new Error(`Référence ${network} ${payment.reference?.trim()} déjà utilisée pour une vente en attente de synchronisation`)
+    if (!isOnline()) continue
+    const { data, error } = await getSupabaseClient().rpc('payment_reference_used', { p_method: payment.method, p_reference: payment.reference })
+    if (!error && data) throw new Error(`Référence ${network} ${payment.reference?.trim()} déjà utilisée pour la vente ${data}`)
+  }
+}
 const salesTable = () => getSupabaseClient().from('sales')
 
 const service = {
@@ -22,7 +41,7 @@ const service = {
     if (!user) throw new Error('Non authentifie')
 
     const { data, error } = await cashSessionsTable()
-      .select('*, opener:profiles(full_name)')
+      .select('*, opener:profiles!cash_sessions_opened_by_fkey(full_name)')
       .eq('opened_by', user.id)
       .is('closed_at', null)
       .maybeSingle()
@@ -90,13 +109,29 @@ const service = {
       payments: input.payments,
       notes: input.notes?.trim() || null,
     })
+    await assertReferencesUnused(input)
     // Offline-first: persist the sale before any network request, then sync in background.
-    const localSale = await enqueueSale(input)
+    const localSale = await enqueueSale({ ...input, soldAt: input.soldAt ?? new Date().toISOString() })
     await patchSnapshot<Product>('products', (rows) => rows.map((product) => {
       const sold = input.items.filter((item) => item.productId === product.id).reduce((sum, item) => sum + item.quantity, 0)
       return sold ? { ...product, stock_quantity: Number(product.stock_quantity) - sold } : product
     }))
     void pushChanges().catch(() => undefined)
+    // Online, the server answers within a few seconds: the receipt then carries the real sale
+    // number, and a refusal (stock taken meanwhile by another till…) is shown before the receipt.
+    for (let waited = 0; isOnline() && waited < 6000; waited += 250) {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      const saved = await getOfflineSale(localSale.id)
+      if (saved?.state === 'synced') return { id: localSale.clientSaleId, sale_number: saved.serverSaleNumber ?? `LOCAL-${localSale.clientSaleId.slice(0, 8)}`, sync_state: 'synced' }
+      if (saved?.state === 'sync_error') {
+        await deleteOfflineSale(localSale.id)
+        await patchSnapshot<Product>('products', (rows) => rows.map((product) => {
+          const sold = input.items.filter((item) => item.productId === product.id).reduce((sum, item) => sum + item.quantity, 0)
+          return sold ? { ...product, stock_quantity: Number(product.stock_quantity) + sold } : product
+        }))
+        throw new Error(saved.lastError ?? 'Vente refusée par le serveur')
+      }
+    }
     return { id: localSale.clientSaleId, sale_number: `LOCAL-${localSale.clientSaleId.slice(0, 8)}`, sync_state: localSale.state }
   },
 
@@ -139,14 +174,15 @@ export const posService = withOffline('pos', service, {
     } },
   },
   writes: {
-    // Supabase sales are already queued by createSale itself; this covers the local server being unreachable.
-    createSale: { label: (input: SaleInput) => `Vente de ${input.items.length} article(s)`, createsId: true, optimistic: async (id: string, input: SaleInput) => {
+    // Supabase sales are saved on the device by createSale itself (offline-first). Queuing the call here
+    // too would only write the sale at sync time, with the wrong time: local server only.
+    ...(isLocalDbConfigured ? { createSale: { label: (input: SaleInput) => `Vente de ${input.items.length} article(s)`, createsId: true, optimistic: async (id: string, input: SaleInput) => {
       await patchSnapshot<Product>('products', (rows) => rows.map((product) => {
         const sold = input.items.filter((item) => item.productId === product.id).reduce((sum, item) => sum + item.quantity, 0)
         return sold ? { ...product, stock_quantity: Number(product.stock_quantity) - sold } : product
       }))
       return { id, sale_number: `LOCAL-${id.slice(6, 14)}`, sync_state: 'pending_sync' }
-    } },
+    } } } : {}),
     openSession: { label: 'Ouverture de caisse', createsId: true, optimistic: async (id: string, input: CashSessionInput) => {
       if ((await readCache(CURRENT_SESSION_KEY))?.value) throw new Error('Une session de caisse est deja ouverte')
       const session = { id, opening_amount: input.opening_amount, notes: input.notes ?? null, opened_at: new Date().toISOString(), closed_at: null, offline: true }

@@ -9,6 +9,8 @@ export type SyncStatus = {
   lastSyncAt: string | null
   lastError: string | null
   cachedSince: string | null
+  /** Outcome of the last push that sent or refused something (shown briefly to the user). */
+  report: { at: string; sent: number; failed: number; errors: string[] } | null
 }
 
 const LAST_SYNC_KEY = 'mp:last-sync'
@@ -22,6 +24,7 @@ let status: SyncStatus = {
   lastSyncAt: readLastSync(),
   lastError: null,
   cachedSince: null,
+  report: null,
 }
 const listeners = new Set<() => void>()
 

@@ -1,11 +1,11 @@
 import { Navigate, Outlet, useLocation } from 'react-router-dom'
 import { isLocalDbConfigured, isSupabaseConfigured } from '../lib/supabase'
 import { useAuth } from '../contexts/AuthContext'
-import type { RoleCode } from '../types/auth'
+import type { PermissionCode } from '../lib/permissions'
 import { AppShellSkeleton } from './Skeleton'
 
-export function ProtectedRoute({ roles }: { roles?: RoleCode[] }) {
-  const { session, profile, loading } = useAuth()
+export function ProtectedRoute({ anyOf }: { anyOf?: PermissionCode[] }) {
+  const { session, profile, loading, can } = useAuth()
   const location = useLocation()
   if (!isSupabaseConfigured && !isLocalDbConfigured) return <Navigate to="/login" replace />
   if (loading) return <AppShellSkeleton label="Chargement de la session" />
@@ -14,6 +14,6 @@ export function ProtectedRoute({ roles }: { roles?: RoleCode[] }) {
   // user back to the login screen during that short interval.
   if (!profile) return <AppShellSkeleton label="Chargement de votre profil" />
   if (!profile?.active) return <Navigate to="/login" replace />
-  if (roles && (!profile.role || !roles.includes(profile.role.code))) return <Navigate to="/" replace />
+  if (anyOf && !anyOf.some(can)) return <Navigate to="/" replace />
   return <Outlet />
 }

@@ -1,3 +1,4 @@
+import { callUsersFunction } from '../services/userService';
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { isSupabaseConfigured, supabase } from '../lib/supabase'
@@ -7,6 +8,7 @@ import type { Profile } from '../types/auth'
 import { isNetworkError } from '../lib/offline/network'
 import { isOnline } from '../lib/offline/status'
 import { setSyncUser } from '../services/syncService'
+import { cachedPermissions, clearPermissions, defaultPermissions, savePermissions, type PermissionCode } from '../lib/permissions'
 
 // The last profile is kept so that a signed-in user can keep working offline.
 const PROFILE_KEY = 'mp:profile'
@@ -29,7 +31,7 @@ type LocalSession = {
   token: string;
 };
 
-type AuthState = { session: Session | LocalSession | null; profile: Profile | null; loading: boolean; error: string | null; refreshProfile: () => Promise<void>; signIn: (email: string, password: string) => Promise<void>; signOut: () => Promise<void> }
+type AuthState = { session: Session | LocalSession | null; profile: Profile | null; loading: boolean; error: string | null; refreshProfile: () => Promise<void>; signIn: (email: string, password: string) => Promise<void>; signOut: () => Promise<void>; permissions: PermissionCode[]; can: (code: PermissionCode) => boolean }
 const AuthContext = createContext<AuthState | undefined>(undefined)
 
 const USE_LOCAL_DB = import.meta.env.VITE_USE_LOCAL_DB === 'true';
@@ -84,6 +86,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localApi.setToken(response.token);
       setSession(response as LocalSession);
     } else if (supabase) {
+      // A user name (no « @ ») is resolved by the `users` Edge Function, which returns the session.
+      if (!email.includes('@')) {
+        const { session: tokens } = await callUsersFunction<{ session: { access_token: string; refresh_token: string } }>({ action: 'login', identifier: email, password });
+        const { data, error } = await supabase.auth.setSession({ access_token: tokens.access_token, refresh_token: tokens.refresh_token });
+        if (error) throw error;
+        setSession(data.session);
+        return;
+      }
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
       setSession(data.session);
@@ -92,6 +102,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOut = async () => {
     clearProfile();
+    clearPermissions();
     setSyncUser(null);
     if (USE_LOCAL_DB) {
       localApi.clearToken();
@@ -158,7 +169,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (profile) setSyncUser(profile.id, profile.role?.code ?? '');
   }, [profile]);
 
-  const value = useMemo(() => ({ session, profile, loading, error, refreshProfile, signIn, signOut }), [session, profile, loading, error]);
+  // The role's permissions from the database; until they arrive (or offline), the last ones loaded, else the role defaults.
+  const [loadedPermissions, setLoadedPermissions] = useState<{ userId: string; codes: PermissionCode[] } | null>(null);
+  useEffect(() => {
+    if (!profile || USE_LOCAL_DB || !supabase) return;
+    let current = true;
+    void supabase.rpc('my_permissions').then(({ data, error: loadError }) => {
+      if (!current || loadError || !Array.isArray(data)) return;
+      savePermissions(profile.id, data as PermissionCode[]);
+      setLoadedPermissions({ userId: profile.id, codes: data as PermissionCode[] });
+    });
+    return () => { current = false };
+  }, [profile]);
+  const permissions = useMemo(() => {
+    if (!profile) return [];
+    if (USE_LOCAL_DB) return defaultPermissions(profile.role?.code);
+    if (loadedPermissions?.userId === profile.id) return loadedPermissions.codes;
+    return cachedPermissions(profile.id) ?? defaultPermissions(profile.role?.code);
+  }, [profile, loadedPermissions]);
+
+  const value = useMemo(() => ({ session, profile, loading, error, refreshProfile, signIn, signOut, permissions, can: (code: PermissionCode) => permissions.includes(code) }), [session, profile, loading, error, permissions]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

@@ -66,7 +66,45 @@ async function initDatabase() {
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
   db.run('CREATE INDEX IF NOT EXISTS cash_counts_counted_at_idx ON cash_counts(counted_at)');
+
+  // Units and supplier categories (step 7), same seeds as the Supabase migration.
+  for (const table of ['units', 'supplier_categories']) {
+    db.run(`CREATE TABLE IF NOT EXISTS ${table} (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`);
+  }
+  const seed = (table, names) => {
+    const existing = new Set(db.exec(`SELECT name FROM ${table}`)[0]?.values.map(([name]) => catalogKey(name)) ?? []);
+    for (const name of names.map(cleanName).filter(Boolean)) {
+      if (existing.has(catalogKey(name))) continue;
+      db.run(`INSERT INTO ${table} (id, name) VALUES (?, ?)`, [crypto.randomUUID(), name]);
+      existing.add(catalogKey(name));
+    }
+  };
+  seed('units', ['unité', 'pièce', 'sac', 'kg', 'lb', 'litre', 'gallon', 'marmite', 'boîte', 'paquet', 'douzaine', 'bouteille', 'mètre']);
+  seed('supplier_categories', ['Producteurs locaux', 'Grossistes', 'Importateurs', 'Transport et services']);
+  try {
+    seed('units', db.exec('SELECT DISTINCT unit FROM products')[0]?.values.map(([unit]) => unit) ?? []);
+    const profileColumns = db.exec('PRAGMA table_info(profiles)')[0]?.values.map((column) => column[1]) ?? [];
+    if (profileColumns.length && !profileColumns.includes('username')) db.run('ALTER TABLE profiles ADD COLUMN username TEXT');
+    const expenseColumns = db.exec('PRAGMA table_info(expenses)')[0]?.values.map((column) => column[1]) ?? [];
+    for (const [column, type] of [['status', "TEXT NOT NULL DEFAULT 'active'"], ['cancel_reason', 'TEXT'], ['cancelled_at', 'TEXT'], ['cancelled_by', 'TEXT']]) {
+      if (expenseColumns.length && !expenseColumns.includes(column)) db.run(`ALTER TABLE expenses ADD COLUMN ${column} ${type}`);
+    }
+    const supplierColumns = db.exec('PRAGMA table_info(suppliers)')[0]?.values.map((column) => column[1]) ?? [];
+    if (supplierColumns.length && !supplierColumns.includes('category_id')) db.run('ALTER TABLE suppliers ADD COLUMN category_id TEXT REFERENCES supplier_categories(id) ON DELETE SET NULL');
+  } catch {
+    // A database that has not been initialized yet is handled by init-db.js.
+  }
 }
+
+// Duplicate checks ignore case and repeated spaces (catalog_key in Supabase).
+function cleanName(value) { return String(value ?? '').trim().replace(/\s+/g, ' '); }
+function catalogKey(value) { return cleanName(value).toLocaleLowerCase('fr'); }
 
 await initDatabase();
 
@@ -83,7 +121,7 @@ setInterval(saveDatabase, 30000);
 // Middleware
 // Allow all origins for development (browser preview uses dynamic ports)
 app.use(cors({ origin: true }));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' })); // room for the company logo (Paramètres)
 
 // JWT Secret
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
@@ -169,7 +207,8 @@ app.post('/auth/login', async (req, res) => {
     }
 
     // Get user from database
-    const user = queryOne('SELECT * FROM local_users WHERE email = ? AND is_active = 1', [email]);
+    // E-mail or user name, like the Supabase version.
+    const user = queryOne('SELECT lu.* FROM local_users lu LEFT JOIN profiles p ON p.id = lu.id WHERE (lower(lu.email) = lower(?) OR lower(p.username) = lower(?)) AND lu.is_active = 1', [email, email]);
 
     if (!user) {
       registerLoginFailure(req);
@@ -256,7 +295,7 @@ app.get('/admin/users', authenticateToken, (req, res) => {
   try {
     if (!canManageAdministration(req.user)) return res.status(403).json({ error: 'Permission denied' });
     const users = query(`
-      select p.id, p.full_name, p.email, p.active, p.role_id,
+      select p.id, p.full_name, p.email, p.username, p.active, p.role_id,
              r.code as role_code, r.name as role_name
       from profiles p
       join roles r on r.id = p.role_id
@@ -265,6 +304,7 @@ app.get('/admin/users', authenticateToken, (req, res) => {
       id: row.id,
       full_name: row.full_name,
       email: row.email,
+      username: row.username ?? null,
       active: Boolean(row.active),
       role_id: row.role_id,
       role: { code: row.role_code, name: row.role_name },
@@ -277,12 +317,59 @@ app.get('/admin/users', authenticateToken, (req, res) => {
   }
 });
 
+const USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{2,31}$/;
+
+// Same rules as the Supabase Edge Function `users`.
+app.post('/admin/users', authenticateToken, async (req, res) => {
+  try {
+    if (!canManageAdministration(req.user)) return res.status(403).json({ error: 'Seuls les responsables autorisés gèrent les comptes utilisateurs' });
+    const fullName = String(req.body?.full_name ?? '').trim();
+    const username = String(req.body?.username ?? '').trim().toLowerCase();
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const password = String(req.body?.password ?? '');
+    const roleId = String(req.body?.role_id ?? '');
+    if (fullName.length < 2) return res.status(400).json({ error: 'Le nom complet est obligatoire' });
+    if (!USERNAME_PATTERN.test(username)) return res.status(400).json({ error: 'Nom d’utilisateur invalide : 3 à 32 caractères, lettres minuscules, chiffres, point, tiret ou tiret bas' });
+    if (password.length < 8) return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères' });
+    if (!queryOne('select id from roles where id = ?', [roleId])) return res.status(400).json({ error: 'Rôle inconnu' });
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Adresse e-mail invalide' });
+    if (queryOne('select id from profiles where lower(username) = ?', [username])) return res.status(409).json({ error: `Le nom d’utilisateur « ${username} » est déjà pris` });
+    const loginEmail = email || `${username}@utilisateurs.maket-peyizan.invalid`;
+    if (queryOne('select id from local_users where lower(email) = ?', [loginEmail])) return res.status(409).json({ error: 'Cette adresse e-mail est déjà utilisée' });
+    const id = crypto.randomUUID();
+    const hash = await bcrypt.hash(password, 10);
+    execute('insert into local_users (id, email, password_hash, full_name, is_active) values (?, ?, ?, ?, 1)', [id, loginEmail, hash, fullName]);
+    execute('insert into profiles (id, full_name, email, username, role_id, active) values (?, ?, ?, ?, ?, 1)', [id, fullName, loginEmail, username, roleId]);
+    saveDatabase();
+    res.json({ user: { id, username, email: email || null } });
+  } catch (err) {
+    console.error('Create local user error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/admin/users/:id/password', authenticateToken, async (req, res) => {
+  try {
+    if (!canManageAdministration(req.user)) return res.status(403).json({ error: 'Seuls les responsables autorisés gèrent les comptes utilisateurs' });
+    const password = String(req.body?.password ?? '');
+    if (password.length < 8) return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères' });
+    if (!queryOne('select id from local_users where id = ?', [req.params.id])) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    execute("update local_users set password_hash = ?, updated_at = datetime('now') where id = ?", [await bcrypt.hash(password, 10), req.params.id]);
+    saveDatabase();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Set local password error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.patch('/admin/users/:id', authenticateToken, (req, res) => {
   transactionActive = true;
   try {
     if (!canManageAdministration(req.user)) return res.status(403).json({ error: 'Permission denied' });
     const userId = req.params.id;
-    if (!userId || userId === req.user.id) return res.status(400).json({ error: 'You cannot modify your own access' });
+    const touchesAccess = req.body && ('active' in req.body || 'role_id' in req.body);
+    if (!userId || (touchesAccess && userId === req.user.id)) return res.status(400).json({ error: 'You cannot modify your own access' });
 
     const existing = queryOne(`
       select p.id, p.active, p.role_id, r.code as role_code
@@ -310,6 +397,22 @@ app.patch('/admin/users/:id', authenticateToken, (req, res) => {
       updates.push('role_id = ?');
       values.push(nextRoleId);
     }
+    if (Object.prototype.hasOwnProperty.call(patch, 'full_name')) {
+      if (String(patch.full_name ?? '').trim().length < 2) return res.status(400).json({ error: 'Le nom complet est obligatoire' });
+      updates.push('full_name = ?'); values.push(String(patch.full_name).trim());
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'username')) {
+      const username = patch.username ? String(patch.username).trim().toLowerCase() : null;
+      if (username && !USERNAME_PATTERN.test(username)) return res.status(400).json({ error: 'Nom d’utilisateur invalide : 3 à 32 caractères, lettres minuscules, chiffres, point, tiret ou tiret bas' });
+      if (username && queryOne('select id from profiles where lower(username) = ? and id <> ?', [username, userId])) return res.status(409).json({ error: `Le nom d’utilisateur « ${username} » est déjà pris` });
+      updates.push('username = ?'); values.push(username);
+    }
+    if (patch.email) {
+      const email = String(patch.email).trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Adresse e-mail invalide' });
+      if (queryOne('select id from local_users where lower(email) = ? and id <> ?', [email, userId])) return res.status(409).json({ error: 'Cette adresse e-mail est déjà utilisée' });
+      updates.push('email = ?'); values.push(email);
+    }
     if (!updates.length) return res.status(400).json({ error: 'No valid changes provided' });
 
     const nextRole = queryOne('select code from roles where id = ?', [nextRoleId]);
@@ -327,6 +430,8 @@ app.patch('/admin/users/:id', authenticateToken, (req, res) => {
     if (Object.prototype.hasOwnProperty.call(patch, 'active')) {
       execute('update local_users set is_active = ?, updated_at = datetime(\'now\') where id = ?', [nextActive ? 1 : 0, userId]);
     }
+    if (patch.email) execute('update local_users set email = ? where id = ?', [String(patch.email).trim().toLowerCase(), userId]);
+    if (patch.full_name) execute('update local_users set full_name = ? where id = ?', [String(patch.full_name).trim(), userId]);
     db.run('COMMIT');
     transactionActive = false;
     saveDatabase();
@@ -399,7 +504,7 @@ app.put('/admin/settings/:key', authenticateToken, (req, res) => {
 const operationalReadableTables = new Set([
   'products', 'categories', 'suppliers', 'customers', 'cash_sessions', 'sales',
   'sale_items', 'payments', 'stock_movements', 'proformas', 'proforma_items',
-  'profiles', 'cash_counts',
+  'profiles', 'cash_counts', 'units', 'supplier_categories',
 ]);
 const accountingReadableTables = new Set([
   'accounts', 'accounting_periods', 'journal_entries', 'journal_entry_lines',
@@ -442,11 +547,13 @@ app.post('/query', authenticateToken, (req, res) => {
 
 // Restricted CRUD bridge for the local preview. Table and column names are allow-listed;
 // values are still bound parameters, never concatenated SQL values.
-const editableTables = new Set(['categories', 'customers', 'suppliers', 'products', 'cash_sessions', 'expenses', 'cash_counts']);
+const editableTables = new Set(['categories', 'customers', 'suppliers', 'products', 'cash_sessions', 'expenses', 'cash_counts', 'units', 'supplier_categories']);
 const writableColumns = {
   categories: new Set(['name', 'description', 'active']),
   customers: new Set(['customer_number', 'full_name', 'phone', 'email', 'address', 'company_name', 'tax_id', 'customer_type', 'notes', 'active']),
-  suppliers: new Set(['name', 'company_name', 'phone', 'email', 'address', 'tax_id', 'notes', 'active']),
+  suppliers: new Set(['name', 'company_name', 'category_id', 'phone', 'email', 'address', 'tax_id', 'notes', 'active']),
+  units: new Set(['name', 'active']),
+  supplier_categories: new Set(['name', 'active']),
   products: new Set(['barcode', 'name', 'brand', 'category_id', 'supplier_id', 'unit', 'purchase_price', 'selling_price', 'proforma_price', 'minimum_stock', 'image_url', 'expiration_date', 'description', 'active']),
   cash_sessions: new Set(['opened_by', 'opening_amount', 'notes', 'closed_at', 'closing_amount']),
   expenses: new Set(['label', 'amount', 'expense_date', 'notes', 'created_by']),
@@ -537,6 +644,34 @@ app.post('/data', authenticateToken, (req, res) => {
         return res.status(400).json({ error: 'Selected supplier is unavailable' });
       }
     }
+    // Duplicates and units: same rules as the Supabase triggers.
+    const duplicate = (sql, field, ...params) => query(sql, params).find((row) => row.id !== id && catalogKey(row[field]) === catalogKey(values[field]));
+    if (Object.prototype.hasOwnProperty.call(values, 'name') && ['products', 'suppliers', 'units', 'supplier_categories'].includes(table)) {
+      values.name = cleanName(values.name);
+      if (!values.name) return res.status(400).json({ error: 'Le nom est obligatoire.' });
+      const other = duplicate(`select id, name, ${table === 'units' || table === 'supplier_categories' ? '1 as active' : 'active'} from ${table}`, 'name');
+      if (other) {
+        const label = { products: 'Un produit nommé', suppliers: 'Un fournisseur nommé', units: 'L’unité', supplier_categories: 'La catégorie' }[table];
+        return res.status(400).json({ error: `${label} « ${other.name} » existe déjà${other.active ? '' : ' (inactif : réactivez-le plutôt)'}.` });
+      }
+    }
+    if (table === 'products') {
+      if (Object.prototype.hasOwnProperty.call(values, 'barcode')) {
+        values.barcode = String(values.barcode ?? '').trim() || null;
+        const other = values.barcode && queryOne('select name from products where barcode = ? and id <> ?', [values.barcode, id ?? '']);
+        if (other) return res.status(400).json({ error: `Le code-barres ${values.barcode} est déjà utilisé par « ${other.name} ».` });
+      }
+      const currentUnit = action === 'update' ? queryOne('select unit from products where id = ?', [id])?.unit : undefined;
+      if (action === 'insert' || (Object.prototype.hasOwnProperty.call(values, 'unit') && values.unit !== currentUnit)) {
+        const unit = query('select name from units where active = 1').find((row) => catalogKey(row.name) === catalogKey(values.unit ?? 'unité'));
+        if (!unit) return res.status(400).json({ error: `Unité « ${values.unit} » inconnue : ajoutez-la d’abord à la liste des unités.` });
+        values.unit = unit.name;
+      }
+    }
+    if (table === 'suppliers' && values.category_id && !queryOne('select id from supplier_categories where id = ?', [values.category_id])) {
+      return res.status(400).json({ error: 'Selected supplier category is unavailable' });
+    }
+    if (table === 'products' && action === 'insert' && !columns.includes('unit')) columns.push('unit');
     const normalized = columns.map((column) => values[column] ?? null);
     let recordId = id;
     if (action === 'insert') {
@@ -700,6 +835,14 @@ app.post('/rpc/complete_sale', authenticateToken, (req, res) => {
     for (const payment of payments) {
       const amount = Number(payment.amount);
       if (!paymentMethods.has(payment.method) || !Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'Invalid payment' });
+      // Same rule as Supabase: mobile money needs a transaction ID used only once.
+      if (payment.method === 'moncash' || payment.method === 'natcash') {
+        const network = payment.method === 'moncash' ? 'MonCash' : 'NatCash';
+        const reference = String(payment.reference ?? '').trim();
+        if (!reference) return res.status(400).json({ error: `Référence de transaction ${network} obligatoire` });
+        const used = queryOne('select s.sale_number from payments p join sales s on s.id = p.sale_id where p.method = ? and lower(trim(p.reference)) = lower(?)', [payment.method, reference]);
+        if (used) return res.status(400).json({ error: `Référence ${network} ${reference} déjà utilisée pour la vente ${used.sale_number}` });
+      }
       paidTotal += amount;
       if (payment.method === 'cash') cashTendered += amount;
     }
@@ -746,7 +889,7 @@ app.post('/rpc/complete_sale', authenticateToken, (req, res) => {
       execute(`
         INSERT INTO payments (id, sale_id, method, amount, reference, received_by)
         VALUES (?, ?, ?, ?, ?, ?)
-      `, [crypto.randomUUID(), saleId, payment.method, appliedAmount, payment.reference || null, userId]);
+      `, [crypto.randomUUID(), saleId, payment.method, appliedAmount, String(payment.reference ?? '').trim() || null, userId]);
     }
 
     db.run('COMMIT');
@@ -899,10 +1042,27 @@ app.post('/rpc/delete_expense', authenticateToken, (req, res) => {
     const expense = queryOne('SELECT * FROM expenses WHERE id = ?', [id]);
     if (!expense) return res.status(404).json({ error: 'Expense not found' });
     
-    execute('DELETE FROM expenses WHERE id = ?', [id]);
-    res.json({ success: true });
+    // Same rule as Supabase: an expense is never deleted, it is cancelled with a reason.
+    res.status(400).json({ error: 'Une dépense ne se supprime pas : annulez-la avec un motif' });
   } catch (err) {
     console.error('Delete expense error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/rpc/cancel_expense', authenticateToken, (req, res) => {
+  try {
+    if (!canManageExpenses(req.user)) return res.status(403).json({ error: 'Permission denied' });
+    const { id, reason } = req.body;
+    if (String(reason ?? '').trim().length < 3) return res.status(400).json({ error: 'Indiquez le motif de l’annulation' });
+    const expense = queryOne('SELECT * FROM expenses WHERE id = ?', [id]);
+    if (!expense) return res.status(404).json({ error: 'Dépense introuvable' });
+    if (expense.status === 'cancelled') return res.status(400).json({ error: 'Cette dépense est déjà annulée' });
+    execute("UPDATE expenses SET status = 'cancelled', cancel_reason = ?, cancelled_at = datetime('now'), cancelled_by = ? WHERE id = ?", [String(reason).trim(), req.user.id, id]);
+    saveDatabase();
+    res.json(queryOne('SELECT * FROM expenses WHERE id = ?', [id]));
+  } catch (err) {
+    console.error('Cancel expense error:', err);
     res.status(500).json({ error: err.message });
   }
 });

@@ -7,6 +7,9 @@ export type ExpenseInput = {
   amount: number;
   expense_date?: string;
   notes?: string;
+  /** Accounting accounts (Supabase): defaults 518000 and 101000 when empty. */
+  expense_account_id?: string | null;
+  payment_account_id?: string | null;
 }
 
 const expensesTable = () => getSupabaseClient().from('expenses')
@@ -20,9 +23,9 @@ const service = {
     const keys = Array.from({ length: months }, (_, index) => { const date = new Date(now.getFullYear(), now.getMonth() - months + 1 + index, 1); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}` })
     const start = `${keys[0]}-01`
     const rows = isLocalDbConfigured
-      ? await localApi.query<{ expense_date: string; amount: number }>('select expense_date, amount from expenses where expense_date >= ?', [start])
+      ? await localApi.query<{ expense_date: string; amount: number }>("select expense_date, amount from expenses where expense_date >= ? and coalesce(status, 'active') <> 'cancelled'", [start])
       : await (async () => {
-        const { data, error } = await expensesTable().select('expense_date, amount').gte('expense_date', start)
+        const { data, error } = await expensesTable().select('expense_date, amount').gte('expense_date', start).neq('status', 'cancelled')
         if (error) throw error
         return (data ?? []) as { expense_date: string; amount: number }[]
       })()
@@ -49,7 +52,7 @@ const service = {
     }
     const from = page * 20;
     return expensesTable()
-      .select('*, creator:profiles(full_name)', { count: 'exact' })
+      .select('*, creator:profiles!expenses_created_by_fkey(full_name), expense_account:accounts!expenses_expense_account_id_fkey(code, name), journal:journal_entries!expenses_journal_entry_id_fkey(entry_number)', { count: 'exact' })
       .order('expense_date', { ascending: false })
       .range(from, from + 19)
   },
@@ -57,8 +60,10 @@ const service = {
   createExpense: async (input: ExpenseInput) => {
     if (isLocalDbConfigured) {
       const profile = await localApi.getProfile();
+      // The local server has no accounting columns.
+      const { expense_account_id: _expenseAccount, payment_account_id: _paymentAccount, ...values } = input
       return localApi.mutate('insert', 'expenses', {
-        ...input,
+        ...values,
         expense_date: input.expense_date || new Date().toISOString().split('T')[0],
         created_by: profile.id
       }).then((data) => ({ data, error: null }))
@@ -76,13 +81,15 @@ const service = {
       .single()
   },
 
-  deleteExpense: async (id: string) => {
+  /** An expense is never deleted: it is cancelled with a reason, its entry voided, and stays visible. */
+  cancelExpense: async (id: string, reason: string) => {
     if (isLocalDbConfigured) {
-      return localApi.rpc('delete_expense', { id })
+      return localApi.rpc('cancel_expense', { id, reason })
         .then(() => ({ error: null }))
         .catch((error) => ({ error }));
     }
-    return expensesTable().delete().eq('id', id)
+    const { error } = await getSupabaseClient().rpc('cancel_expense', { p_id: id, p_reason: reason })
+    return { error }
   },
 }
 
@@ -91,6 +98,6 @@ export const expenseService = withOffline('expenses', service, {
   reads: { getExpenses: true, getMonthlyTotals: true },
   writes: {
     createExpense: { label: (input: ExpenseInput) => `Dépense « ${input.label} »`, createsId: true, optimistic: (id: string, input: ExpenseInput) => ({ ...input, id, expense_date: input.expense_date || new Date().toISOString().split('T')[0] }) },
-    deleteExpense: { label: 'Suppression d’une dépense' },
   },
+  onlineOnly: ['cancelExpense'],
 })

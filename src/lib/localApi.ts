@@ -128,7 +128,15 @@ class LocalApiClient {
     return this.request('/admin/users');
   }
 
-  async updateManagedUser(userId: string, values: { active?: boolean; role_id?: string }): Promise<LocalManagedUser> {
+  async createManagedUser(values: { full_name: string; username: string; email: string; role_id: string; password: string }): Promise<{ user: { id: string } }> {
+    return this.request('/admin/users', { method: 'POST', body: JSON.stringify(values) });
+  }
+
+  async setManagedUserPassword(userId: string, password: string): Promise<{ ok: boolean }> {
+    return this.request(`/admin/users/${encodeURIComponent(userId)}/password`, { method: 'POST', body: JSON.stringify({ password }) });
+  }
+
+  async updateManagedUser(userId: string, values: { active?: boolean; role_id?: string; full_name?: string; username?: string | null; email?: string }): Promise<LocalManagedUser> {
     return this.request(`/admin/users/${encodeURIComponent(userId)}`, {
       method: 'PATCH',
       body: JSON.stringify(values),

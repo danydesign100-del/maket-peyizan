@@ -32,7 +32,7 @@ VITE_USE_LOCAL_DB=true
 VITE_API_URL=http://localhost:$API_PORT
 EOF
 elif ! grep -q '^VITE_USE_LOCAL_DB=true' "$ROOT/.env.local"; then
-  log "Attention : .env.local existe sans VITE_USE_LOCAL_DB=true — le frontend utilisera Supabase."
+  log "Attention : .env.local existe sans VITE_USE_LOCAL_DB=true - le frontend utilisera Supabase."
 fi
 
 # 3. Dépendances
@@ -68,7 +68,7 @@ done
 curl -sf "http://localhost:$API_PORT/health" >/dev/null 2>&1 || fail "L'API ne répond pas sur /health."
 
 # 6. Lancement du frontend
-log "Démarrage du frontend — connexion : admin@maketpeyizan.com / admin123"
+log "Démarrage du frontend - connexion : admin@maketpeyizan.com / admin123"
 log "Ctrl+C pour tout arrêter"
 cd "$ROOT"
 npx vite --open

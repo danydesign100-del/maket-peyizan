@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
-import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Clock, Coins, Info, RotateCcw, Save, TrendingUp } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Clock, Coins, Info, Printer, RotateCcw, Save, TrendingUp } from 'lucide-react'
+import { ticketDate, useTicket, type TicketLine } from '../components/ThermalTicket'
 import { PageHeader } from '../components/PageHeader'
 import { TableRowsSkeleton } from '../components/Skeleton'
 import { useAuth } from '../contexts/AuthContext'
@@ -76,12 +77,29 @@ function Pair({ render }: { render: (currency: Currency) => ReactNode }) {
 }
 
 export function CashCountPage() {
-  const { profile } = useAuth()
-  const canCount = ['cashier', 'director', 'administrator'].includes(profile?.role?.code ?? '')
+  const { can } = useAuth()
+  const canCount = can('cash.count')
   const [shift, setShift] = useState<Shift>(defaultShift)
   const [direction, setDirection] = useState<Direction>('in')
   const [details, setDetails] = useState<Record<Currency, CurrencyDetail>>({ htg: emptyDetail(), usd: emptyDetail() })
   const [notes, setNotes] = useState('')
+  const ticket = useTicket()
+  /** Cash count ticket: denominations, totals and over/short for each currency. */
+  const printCount = (entry: CashCount) => ticket.print({
+    title: `Comptage de caisse - ${shiftLabel(entry.shift)} (${directionShort(entry.direction)})`,
+    meta: [['Date', ticketDate(entry.counted_at)], ['Agent', entry.submitter_name ?? '-']],
+    lines: CURRENCIES.flatMap((currency): TicketLine[] => [
+      { label: CURRENCY_LABELS[currency].name, strong: true },
+      ...breakdown(currency, entry[currency]).map((line) => ({ label: line.label, quantity: line.quantity ? `× ${line.quantity}` : undefined, amount: line.value })),
+      { label: 'Sorties payées', amount: formatCurrency(currency, entry[currency].paid_outs) },
+      { label: 'Total compté', amount: formatCurrency(currency, currency === 'htg' ? entry.htg_total : entry.usd_total), strong: true },
+      { label: 'Dépôt / retrait', amount: formatCurrency(currency, entry[currency].deposit) },
+      { label: 'Fond de caisse', amount: formatCurrency(currency, entry[currency].bank_till) },
+      { label: 'Écart', amount: formatCurrency(currency, currency === 'htg' ? entry.htg_over_short : entry.usd_over_short), strong: true },
+    ]),
+    notes: entry.notes ? <p>{entry.notes}</p> : undefined,
+    footer: <div className="mt-4 grid grid-cols-2 gap-4 text-left"><p className="border-t border-black pt-1">Agent</p><p className="border-t border-black pt-1">Responsable</p></div>,
+  })
   const [rows, setRows] = useState<CashCount[]>([])
   const [count, setCount] = useState(0)
   const [page, setPage] = useState(0)
@@ -177,19 +195,19 @@ export function CashCountPage() {
             {loading ? <TableRowsSkeleton rows={5} cols={11} />
               : rows.length === 0 ? <tr><td colSpan={11} className="ui-empty">Aucun comptage enregistré{day ? ' ce jour-là' : ''}.</td></tr>
               : rows.map((entry) => <tr key={entry.id} className="align-top">
-                <td className="whitespace-nowrap tabular-nums text-slate-700">{formatDateTime(entry.counted_at)}{entry.pending && <span className="mt-1 block"><span className="ui-badge ui-badge-warning">En attente de synchro</span></span>}</td>
+                <td className="whitespace-nowrap tabular-nums text-slate-700"><button type="button" onClick={() => printCount(entry)} title="Imprimer le ticket de comptage" className="mr-1.5 align-middle text-slate-400 hover:text-brand-700"><Printer className="inline h-3.5 w-3.5" aria-label="Imprimer" /></button>{formatDateTime(entry.counted_at)}{entry.pending && <span className="mt-1 block"><span className="ui-badge ui-badge-warning">En attente de synchro</span></span>}</td>
                 <td className="whitespace-nowrap"><span className="font-semibold text-slate-900">{shiftLabel(entry.shift)}</span><span className={`ml-1.5 ui-badge ${entry.direction === 'in' ? 'ui-badge-success' : 'ui-badge-neutral'}`}>{directionShort(entry.direction)}</span></td>
-                <td className="whitespace-nowrap text-slate-700">{entry.submitter_name ?? '—'}</td>
+                <td className="whitespace-nowrap text-slate-700">{entry.submitter_name ?? '-'}</td>
                 {CURRENCIES.map((currency) => {
                   const lines = breakdown(currency, entry[currency])
-                  return <td key={currency} className="min-w-40">{lines.length ? <dl className="space-y-0.5">{lines.map((line) => <div key={line.label} className="flex justify-between gap-3 whitespace-nowrap"><dt className="text-slate-500">{line.label}{line.quantity ? ` × ${line.quantity}` : ''}</dt><dd className="tabular-nums font-medium text-slate-800">{line.value}</dd></div>)}</dl> : <span className="text-slate-400">—</span>}</td>
+                  return <td key={currency} className="min-w-40">{lines.length ? <dl className="space-y-0.5">{lines.map((line) => <div key={line.label} className="flex justify-between gap-3 whitespace-nowrap"><dt className="text-slate-500">{line.label}{line.quantity ? ` × ${line.quantity}` : ''}</dt><dd className="tabular-nums font-medium text-slate-800">{line.value}</dd></div>)}</dl> : <span className="text-slate-400">-</span>}</td>
                 })}
                 <td><Pair render={(currency) => formatCurrency(currency, entry[currency].paid_outs)} /></td>
                 <td><Pair render={(currency) => <strong className="text-slate-950">{formatCurrency(currency, currency === 'htg' ? entry.htg_total : entry.usd_total)}</strong>} /></td>
                 <td><Pair render={(currency) => formatCurrency(currency, entry[currency].deposit)} /></td>
                 <td><Pair render={(currency) => formatCurrency(currency, entry[currency].bank_till)} /></td>
                 <td><Pair render={(currency) => <Balance compact currency={currency} value={currency === 'htg' ? entry.htg_over_short : entry.usd_over_short} />} /></td>
-                <td className="min-w-40 max-w-60 whitespace-pre-line text-slate-600">{entry.notes ?? '—'}</td>
+                <td className="min-w-40 max-w-60 whitespace-pre-line text-slate-600">{entry.notes ?? '-'}</td>
               </tr>)}
           </tbody>
         </table>
@@ -202,5 +220,6 @@ export function CashCountPage() {
         </span>
       </div>}
     </section>
+    {ticket.element}
   </div>
 }

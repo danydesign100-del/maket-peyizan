@@ -22,6 +22,14 @@ if (fs.existsSync(dbPath)) {
   db = new SQL.Database();
 }
 
+// The seed code below uses the better-sqlite3 style (prepare(sql).get(a, b),
+// .run(a, b, c)); sql.js only binds an array, so adapt the calls here.
+const sqlJsPrepare = db.prepare.bind(db);
+db.prepare = (sql) => ({
+  get: (...params) => { const statement = sqlJsPrepare(sql); statement.bind(params); const row = statement.step() ? statement.getAsObject() : undefined; statement.free(); return row; },
+  run: (...params) => { const statement = sqlJsPrepare(sql); statement.run(params); statement.free(); },
+});
+
 console.log('Creating SQLite database at:', dbPath);
 
 // Enable foreign keys
@@ -510,8 +518,7 @@ db.prepare('INSERT OR IGNORE INTO profiles (id, full_name, email, role_id, activ
   adminId,
   'Administrateur',
   'admin@maketpeyizan.com',
-  directorRole.id,
-  1
+  directorRole.id
 );
 
 // Insert chart of accounts
@@ -557,6 +564,7 @@ for (const setting of settings) {
   insertSetting.run(crypto.randomUUID(), setting.key, setting.value, setting.description);
 }
 
+fs.writeFileSync(dbPath, Buffer.from(db.export()));
 db.close();
 console.log('Database initialized successfully!');
 console.log('Create or rotate the initial administrator credentials through the secured setup procedure before use.');

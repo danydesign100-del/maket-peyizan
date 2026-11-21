@@ -193,7 +193,7 @@ export function ImportDialog<Ctx>({ importer, onClose, onDone }: { importer: Imp
               {field.label}{field.required && <span className="text-red-600"> *</span>}
               <select value={mapping[field.key] ?? ''} onChange={(event) => setMapping((current) => { const next = { ...current }; if (event.target.value === '') delete next[field.key]; else next[field.key] = Number(event.target.value); return next })}
                 className={`mt-1 w-full ${field.required && mapping[field.key] === undefined ? 'border-red-300' : ''}`}>
-                <option value="">— Ignorer —</option>
+                <option value="">- Ignorer -</option>
                 {sheet.headers.map((header, index) => <option key={index} value={index}>{header}</option>)}
               </select>
             </label>)}
@@ -212,7 +212,7 @@ export function ImportDialog<Ctx>({ importer, onClose, onDone }: { importer: Imp
               <tbody>{preview.map((item) => <tr key={item.line}>
                 <td className="tabular-nums text-slate-500">{item.line}</td>
                 <td className="max-w-xs">{item.status === 'ok' ? <span className="ui-badge ui-badge-success">Prête</span> : <span className={`ui-badge ${item.status === 'error' ? 'ui-badge-danger' : 'ui-badge-neutral'}`} title={item.message ?? ''}>{item.message}</span>}</td>
-                {importer.fields.filter((field) => mapping[field.key] !== undefined).slice(0, 5).map((field) => <td key={field.key} className="max-w-[12rem] truncate">{item.row[field.key] ?? '—'}</td>)}
+                {importer.fields.filter((field) => mapping[field.key] !== undefined).slice(0, 5).map((field) => <td key={field.key} className="max-w-[12rem] truncate">{item.row[field.key] ?? '-'}</td>)}
               </tr>)}</tbody>
             </table>
           </div>

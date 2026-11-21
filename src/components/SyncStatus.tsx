@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { AlertTriangle, ChevronDown, Cloud, CloudOff, RefreshCw, Trash2, WifiOff } from 'lucide-react'
+import { AlertTriangle, ChevronDown, Cloud, CloudOff, RefreshCw, WifiOff } from 'lucide-react'
 import { useSyncStatus } from '../lib/offline/status'
 import type { OutboxOp } from '../lib/offline/outbox'
 import { pendingSales, type OfflineSale } from '../services/offlineSales'
-import { discardOperation, listOutbox, syncNow } from '../services/syncService'
+import { discardOperation, discardSale, listOutbox, retryOperation, retrySale, syncNow } from '../services/syncService'
 
 const formatTime = (value: string | null) => value
   ? new Intl.DateTimeFormat('fr-HT', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(value))
@@ -17,9 +17,10 @@ export function SyncButton({ tone = 'dark' }: { tone?: 'dark' | 'light' }) {
   const [sales, setSales] = useState<OfflineSale[]>([])
   const ref = useRef<HTMLDivElement>(null)
 
+  const reload = () => Promise.all([listOutbox(), pendingSales()]).then(([nextOps, nextSales]) => { setOps(nextOps); setSales(nextSales) }).catch(() => undefined)
   useEffect(() => {
     if (!open) return
-    void Promise.all([listOutbox(), pendingSales()]).then(([nextOps, nextSales]) => { setOps(nextOps); setSales(nextSales) }).catch(() => undefined)
+    void reload()
     const close = (event: MouseEvent) => { if (!ref.current?.contains(event.target as Node)) setOpen(false) }
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
@@ -59,16 +60,35 @@ export function SyncButton({ tone = 'dark' }: { tone?: 'dark' | 'light' }) {
         <div className="flex justify-between"><dt>Ventes en attente</dt><dd className="font-medium">{sales.length}</dd></div>
       </dl>
       {status.lastError && <p className="mt-3 rounded-md bg-amber-50 px-2.5 py-2 text-xs text-amber-800">{status.lastError}</p>}
-      {(ops.length > 0 || sales.length > 0) && <ul className="mt-3 max-h-56 space-y-1.5 overflow-y-auto">
-        {ops.map((op) => <li key={op.seq} className="flex items-start gap-2 rounded-md bg-slate-50 px-2.5 py-2 text-xs">
+      {(ops.length > 0 || sales.length > 0) && <ul className="mt-3 max-h-72 space-y-1.5 overflow-y-auto">
+        {ops.map((op) => <li key={op.seq} className={`flex items-start gap-2 rounded-md px-2.5 py-2 text-xs ${op.state === 'error' ? 'bg-red-50' : 'bg-slate-50'}`}>
           {op.state === 'error' ? <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600" aria-hidden="true" /> : <RefreshCw className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden="true" />}
-          <span className="min-w-0 flex-1"><span className="block font-medium text-slate-800">{op.label}</span>{op.lastError && <span className="block text-red-700">{op.lastError}</span>}</span>
-          {op.state === 'error' && <button type="button" onClick={() => void discardOperation(op.seq!).then(() => setOps((rows) => rows.filter((row) => row.seq !== op.seq)))} aria-label={`Abandonner : ${op.label}`} className="text-slate-400 hover:text-red-600"><Trash2 className="h-3.5 w-3.5" aria-hidden="true" /></button>}
+          <span className="min-w-0 flex-1">
+            <span className="block font-medium text-slate-800">{op.label}</span>
+            <span className="block text-slate-500">{formatTime(op.createdAt)} · {op.state === 'error' ? 'refusée' : 'en attente'}</span>
+            {op.lastError && <span className="block text-red-700">{op.lastError}</span>}
+            {op.state === 'error' && <span className="mt-1 flex gap-3">
+              <button type="button" onClick={() => void retryOperation(op.seq!).then(reload)} className="font-semibold text-brand-700 hover:underline">Réessayer</button>
+              <button type="button" onClick={() => { if (confirm(`Abandonner « ${op.label} » ? Elle ne sera pas envoyée au serveur.`)) void discardOperation(op.seq!).then(reload) }} className="font-semibold text-red-700 hover:underline">Abandonner</button>
+            </span>}
+          </span>
         </li>)}
-        {sales.map((sale) => <li key={sale.id} className="flex items-start gap-2 rounded-md bg-slate-50 px-2.5 py-2 text-xs">
-          {sale.state === 'sync_error' ? <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600" aria-hidden="true" /> : <RefreshCw className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden="true" />}
-          <span className="min-w-0 flex-1"><span className="block font-medium text-slate-800">Vente du {formatTime(sale.createdAt)}</span>{sale.lastError && <span className="block text-red-700">{sale.lastError}</span>}</span>
-        </li>)}
+        {sales.map((sale) => {
+          const total = sale.input.items.reduce((sum, item) => sum + item.quantity * item.unitPrice - item.discount + item.taxRate, 0)
+          const state = { pending_sync: 'en attente', syncing: 'envoi…', sync_error: 'refusée', synced: 'envoyée' }[sale.state]
+          return <li key={sale.id} className={`flex items-start gap-2 rounded-md px-2.5 py-2 text-xs ${sale.state === 'sync_error' ? 'bg-red-50' : 'bg-slate-50'}`}>
+            {sale.state === 'sync_error' ? <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600" aria-hidden="true" /> : <RefreshCw className={`mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400 ${sale.state === 'syncing' ? 'animate-spin' : ''}`} aria-hidden="true" />}
+            <span className="min-w-0 flex-1">
+              <span className="block font-medium text-slate-800">Vente du {formatTime(sale.createdAt)} · {total.toLocaleString('fr-HT', { minimumFractionDigits: 2 })} HTG</span>
+              <span className="block text-slate-500">{sale.input.items.map((item) => `${item.quantity} × ${item.name}`).join(', ')} · {state}</span>
+              {sale.lastError && <span className="block text-red-700">{sale.lastError}</span>}
+              {sale.state === 'sync_error' && <span className="mt-1 flex gap-3">
+                <button type="button" onClick={() => void retrySale(sale.id).then(reload)} className="font-semibold text-brand-700 hover:underline">Réessayer</button>
+                <button type="button" onClick={() => { if (confirm('Abandonner cette vente ? Elle ne sera jamais enregistrée sur le serveur (stock, caisse et comptabilité). À faire seulement si la vente n’a pas eu lieu.')) void discardSale(sale.id).then(reload) }} className="font-semibold text-red-700 hover:underline">Abandonner</button>
+              </span>}
+            </span>
+          </li>
+        })}
       </ul>}
       <button type="button" onClick={() => void syncNow()} disabled={status.syncing} className="ui-button-primary mt-4 w-full">
         <RefreshCw className={`h-4 w-4 ${status.syncing ? 'animate-spin' : ''}`} aria-hidden="true" />{status.syncing ? 'Synchronisation…' : 'Synchroniser maintenant'}
@@ -84,5 +104,26 @@ export function OfflineBanner() {
   return <div role="status" className="no-print mb-5 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 animate-fade-up">
     <WifiOff className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
     <p><strong className="font-semibold">Mode hors ligne.</strong> Vos opérations sont enregistrées sur cet appareil{pending ? ` (${pending} en attente)` : ''} et seront envoyées automatiquement au retour de la connexion.{cachedSince && <span className="block text-xs text-amber-800/80">Données affichées : copie locale du {formatTime(cachedSince)}.</span>}</p>
+  </div>
+}
+
+/** Briefly reports what the last synchronisation sent and what the server refused. */
+export function SyncReport() {
+  const { report } = useSyncStatus()
+  const [visible, setVisible] = useState<string | null>(null)
+  useEffect(() => {
+    if (!report) return
+    setVisible(report.at)
+    const timer = setTimeout(() => setVisible(null), report.failed ? 15000 : 6000)
+    return () => clearTimeout(timer)
+  }, [report])
+  if (!report || visible !== report.at) return null
+  return <div role="status" className={`no-print fixed bottom-4 right-4 z-50 w-80 max-w-[calc(100vw-2rem)] rounded-xl border px-4 py-3 text-sm shadow-xl ${report.failed ? 'border-red-200 bg-red-50 text-red-900' : 'border-emerald-200 bg-emerald-50 text-emerald-900'}`}>
+    <p className="flex items-start justify-between gap-3 font-semibold">
+      <span>{[report.sent && `${report.sent} opération(s) envoyée(s)`, report.failed && `${report.failed} refusée(s)`].filter(Boolean).join(', ')}</span>
+      <button type="button" onClick={() => setVisible(null)} aria-label="Fermer" className="text-current/60 hover:text-current">×</button>
+    </p>
+    {report.errors.length > 0 && <ul className="mt-1 space-y-0.5 text-xs">{report.errors.slice(0, 4).map((line) => <li key={line}>{line}</li>)}</ul>}
+    {report.failed > 0 && <p className="mt-1 text-xs">Détails et nouvelle tentative : menu de synchronisation (en bas à gauche).</p>}
   </div>
 }

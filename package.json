@@ -7,7 +7,13 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:db": "node supabase/tests/run.mjs && node supabase/tests/scenarios.mjs",
+    "test:ui": "node supabase/tests/ui/run.mjs",
+    "test-version:check": "node scripts/test-version.mjs check",
+    "test-version:db": "node scripts/test-version.mjs db",
+    "test-version:seed": "node scripts/test-version.mjs seed",
+    "test-version:deploy": "node scripts/test-version.mjs deploy"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.116.0",
@@ -18,12 +24,14 @@
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.2.17",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
     "oxlint": "^1.81.0",
+    "playwright-core": "1.56.1",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.2",
     "vite": "^8.3.0"
